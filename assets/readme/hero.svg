@@ -2,7 +2,7 @@
      width="1200" height="390" viewBox="0 0 1200 390"
      role="img" aria-labelledby="title desc">
   <title id="title">see — 为纯文本模型补充原生图片理解</title>
-  <desc id="desc">原图和用户问题经过 see 自动路由到 Qwen3.7 Plus，失败时降级到本地 OCR。</desc>
+  <desc id="desc">原图和用户问题经过 see 自动路由到 Qwen3.7 Plus，失败时降级到本地视觉能力。</desc>
 
   <rect width="1200" height="390" rx="28" fill="#06100E"/>
   <path d="M0 306H1200" stroke="#17332B" stroke-width="2"/>
@@ -47,7 +47,7 @@
     <g id="ocr-output" transform="translate(326 107)">
       <rect width="88" height="50" rx="12" fill="#123126" stroke="#2B6A51" stroke-width="2"/>
       <text x="44" y="22" text-anchor="middle" fill="#94E8C4" font-size="17" font-weight="700">LOCAL</text>
-      <text x="44" y="41" text-anchor="middle" fill="#F4FBF7" font-size="17" font-weight="750">OCR</text>
+      <text x="44" y="41" text-anchor="middle" fill="#F4FBF7" font-size="17" font-weight="750">VISION</text>
     </g>
 
     <text x="28" y="206" fill="#8DA69B" font-size="18">同一个入口，自动选择可用的视觉路径</text>

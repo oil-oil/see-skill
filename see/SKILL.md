@@ -1,6 +1,6 @@
 ---
 name: see
-description: View and understand images with multimodal models. Use when the user asks to inspect, describe, compare, or extract text from one or more image files or URLs. Supports parallel analysis, multi-image comparison, and automatic local OCR fallback.
+description: View and understand images with multimodal models. Use when the user asks to inspect, describe, compare, or extract text from one or more image files or URLs. Supports parallel analysis, multi-image comparison, and automatic local vision/OCR fallback.
 ---
 
 # See
@@ -23,7 +23,7 @@ scripts/ask_media.sh screenshot.png --task "重点识别界面文字"
 
 成功后读取 stdout 中 `output_path=<path>` 指向的 Markdown。
 
-脚本自动完成：选择已配置的多模态供应商 → 失败时切换供应商 → 最后降级到本地 OCR。多图默认并行，结果按输入顺序汇总。
+脚本自动完成：选择已配置的多模态供应商 → 失败时切换供应商 → 最后降级到本地视觉分析。多图默认并行，结果按输入顺序汇总。
 
 云端会把原图直接交给多模态模型，不预先 OCR、缩放或压缩。`--task` 会作为用户问题原样发送；没有特殊问题时不要添加。
 
@@ -43,8 +43,8 @@ Windows 私有配置位于 `%APPDATA%\see\config.env`；macOS/Linux 位于 `~/.c
 
 本地降级：
 
-- macOS：Vision OCR → Tesseract
+- macOS：Vision 场景/人物/人脸/条码/图形结构 + OCR → Tesseract
 - Windows：Windows OCR → Tesseract
 - Linux：Tesseract
 
-可选参数只在需要时使用：`--together`、`--provider`、`--model`、`--task`、`--jobs`、`--ocr-backend`。本地 OCR 只提供文字和基础信息，不得当作完整画面理解。
+可选参数只在需要时使用：`--together`、`--provider`、`--model`、`--task`、`--jobs`、`--ocr-backend`。本地视觉结果不等同于多模态模型的完整语义理解。

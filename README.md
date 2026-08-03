@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="see 为任何不支持图片的模型补充原生图片理解、自动路由和本地 OCR 降级">
+  <img src="./assets/readme/hero.svg" width="100%" alt="see 为任何不支持图片的模型补充原生图片理解、自动路由和本地视觉降级">
 </p>
 
-`see` 让任何不支持图片的模型直接使用外部多模态能力查看图片。它把原图和用户问题交给 Qwen3.7 Plus；没有 Key 或云端失败时，自动降级到系统 OCR。
+`see` 让任何不支持图片的模型直接使用外部多模态能力查看图片。它把原图和用户问题交给 Qwen3.7 Plus；没有 Key 或云端失败时，自动降级到系统视觉能力。
 
 ## 安装
 
@@ -70,7 +70,7 @@ see/scripts/ask_media.sh --together before.png after.png --task "比较界面变
 |---|---|---|
 | 多张图片互不相关 | 默认 | 并行请求，结果按输入顺序汇总 |
 | 前后对比、连续截图、组合证据 | `--together` | 所有原图进入同一次多模态请求 |
-| 只有本地 OCR 可用 | 自动降级 | 多张图片继续并行提取文字 |
+| 只有本地能力可用 | 自动降级 | 多张图片继续并行分析 |
 
 ## 供应商
 
@@ -80,9 +80,9 @@ see/scripts/ask_media.sh --together before.png after.png --task "比较界面变
 | 百炼 | `qwen3.7-plus` | `DASHSCOPE_API_KEY` |
 | OpenRouter | `qwen/qwen3.7-plus` | `OPENROUTER_API_KEY` |
 | TokenDance | `qwen3.7-plus` | `TOKENDANCE_API_KEY` |
-| 本地 | 系统 OCR | 不需要 |
+| 本地 | 系统视觉 / OCR | 不需要 |
 
-自动模式会按照已配置顺序尝试供应商；请求失败后切换下一个，全部失败才进入本地 OCR。
+自动模式会按照已配置顺序尝试供应商；请求失败后切换下一个，全部失败才进入本地视觉分析。
 
 ## Onboard 与 Key 保存
 
@@ -112,14 +112,14 @@ export ZENMUX_API_KEY=你的Key
 ## 本地降级
 
 ```text
-macOS   → Vision OCR   → Tesseract
+macOS   → Vision 图像分析 + OCR → Tesseract
 Windows → Windows OCR  → Tesseract
 Linux   → Tesseract
 ```
 
 macOS Vision 和 Windows OCR 使用系统内置能力，不需要额外 Key。Tesseract 是最后兜底，需要用户自行安装。
 
-本地 OCR 只理解文字和基础位置，不能替代多模态模型对人物、物体、关系、状态和视觉重点的判断。
+macOS 还会返回场景分类、人物/人脸、条码和基础图形结构；这些线索仍不能替代多模态模型的完整语义理解。Windows 和 Linux 目前以 OCR 为主。
 
 ## 参数
 
@@ -132,7 +132,7 @@ macOS Vision 和 Windows OCR 使用系统内置能力，不需要额外 Key。Te
 | `--jobs 4` | 多图并发数 |
 | `--provider NAME` | 临时指定供应商 |
 | `--model NAME` | 临时覆盖模型 |
-| `--ocr-backend system` | 指定本地 OCR |
+| `--ocr-backend system` | 指定本地系统能力 |
 | `-o result.md` | 指定结果文件 |
 
 成功后 stdout 只输出：

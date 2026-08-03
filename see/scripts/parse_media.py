@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze images with configured multimodal APIs, then fall back to local OCR."""
+"""Analyze images with configured multimodal APIs, then fall back to local vision."""
 
 import argparse
 import base64
@@ -309,7 +309,36 @@ def run_json(command: list[str], timeout: int = 180) -> dict[str, Any]:
 def macos_ocr(path: Path) -> dict[str, Any]:
     swift = shutil.which("swift")
     if sys.platform != "darwin" or not swift:
-        raise RuntimeError("macOS Vision OCR is unavailable")
+        raise RuntimeError("macOS Vision analysis is unavailable")
+
+    swiftc = shutil.which("swiftc")
+    if swiftc:
+        runtime_dir = SCRIPT_DIR.parent / ".runtime"
+        binary = runtime_dir / "ocr_macos"
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            needs_build = (
+                not binary.exists()
+                or binary.stat().st_mtime_ns < MACOS_OCR_SCRIPT.stat().st_mtime_ns
+            )
+            if needs_build:
+                temporary = runtime_dir / f"ocr_macos.{os.getpid()}.tmp"
+                try:
+                    subprocess.run(
+                        [swiftc, "-O", str(MACOS_OCR_SCRIPT), "-o", str(temporary)],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=180,
+                    )
+                    temporary.chmod(0o755)
+                    os.replace(temporary, binary)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            return run_json([str(binary), str(path)])
+        except (OSError, subprocess.SubprocessError, RuntimeError):
+            pass
+
     return run_json([swift, str(MACOS_OCR_SCRIPT), str(path)])
 
 
@@ -410,7 +439,7 @@ def local_ocr(path: Path, backend: str, languages: str) -> tuple[dict[str, Any],
             return operation(path), errors
         except Exception as exc:
             errors.append(f"{name}: {safe_error(exc)}")
-    raise RuntimeError("No local OCR backend succeeded. " + "; ".join(errors))
+    raise RuntimeError("No local vision backend succeeded. " + "; ".join(errors))
 
 
 def local_result(path: Path, tmp_dir: Path, index: int, backend: str, languages: str) -> Result:
@@ -430,13 +459,44 @@ def local_result(path: Path, tmp_dir: Path, index: int, backend: str, languages:
         prefix = f"{confidence:.0%} · " if isinstance(confidence, (int, float)) else ""
         blocks.append(f"- {prefix}{value}")
 
+    labels = [
+        f"{item.get('identifier', '').replace('_', ' ')} {item.get('confidence', 0):.0%}"
+        for item in ocr.get("scene_labels", [])
+        if item.get("identifier")
+    ]
+    barcodes = [
+        f"{item.get('symbology', 'unknown')}：{item.get('payload') or '未解码'}"
+        for item in ocr.get("barcodes", [])
+    ]
+    visual_clues = []
+    if labels:
+        visual_clues.append(f"- 场景分类：{'；'.join(labels)}")
+    if "people" in ocr or "faces" in ocr:
+        visual_clues.append(
+            f"- 人物检测：人物框 {len(ocr.get('people', []))}；人脸 {len(ocr.get('faces', []))}"
+        )
+    if barcodes:
+        visual_clues.append(f"- 条码/二维码：{'；'.join(barcodes)}")
+    if any(key in ocr for key in ("rectangles", "salient_objects", "contour_count")):
+        visual_clues.append(
+            "- 图形结构："
+            f"矩形 {len(ocr.get('rectangles', []))}；"
+            f"显著区域 {len(ocr.get('salient_objects', []))}；"
+            f"顶层轮廓 {int(ocr.get('contour_count', 0))}"
+        )
+    if not visual_clues:
+        visual_clues.append("- 当前后端只提供文字识别。")
+
     report = "\n".join([
-        "# 图片本地 OCR",
-        "> 未使用云端多模态模型；这里只提供文字和基础信息。",
+        "# 图片本地分析",
+        "> 未使用云端多模态模型；结果来自系统计算机视觉或 OCR，不等同于完整语义理解。",
         "",
         f"- 尺寸：{ocr.get('width', 0)} × {ocr.get('height', 0)}",
-        f"- OCR：{ocr['backend']}",
+        f"- 本地后端：{ocr['backend']}",
         *([f"- 降级：{'；'.join(errors)}"] if errors else []),
+        "",
+        "## 画面线索",
+        "\n".join(visual_clues),
         "",
         "## 识别文字",
         text or "未识别到文字",
@@ -489,7 +549,7 @@ def route_image(
             print(f"[image {index}] {name} failed: {detail}", file=sys.stderr)
 
     reason = "no API key" if configured == 0 else "cloud providers failed"
-    print(f"[image {index}] local OCR ({reason})", file=sys.stderr)
+    print(f"[image {index}] local analysis ({reason})", file=sys.stderr)
     fallback = local_result(path, tmp_dir, index, ocr_backend, ocr_languages)
     fallback.attempts = [*attempts, *fallback.attempts]
     return fallback
@@ -532,7 +592,7 @@ def route_together(
             print(f"[together] {name} failed: {detail}", file=sys.stderr)
 
     reason = "no API key" if configured == 0 else "cloud providers failed"
-    print(f"[together] local OCR ({reason})", file=sys.stderr)
+    print(f"[together] local analysis ({reason})", file=sys.stderr)
 
     def analyze(item: tuple[int, Path]) -> tuple[int, Result]:
         index, path = item
@@ -557,7 +617,7 @@ def unique_join(values: list[str]) -> str:
 
 
 def strip_title(text: str) -> str:
-    return re.sub(r"^# (?:图片解析|图片本地 OCR)\s*", "", text.strip())
+    return re.sub(r"^# (?:图片解析|图片本地 OCR|图片本地分析)\s*", "", text.strip())
 
 
 def combined_report(paths: list[Path], results: list[Result]) -> str:
@@ -627,7 +687,7 @@ def frontmatter(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="See images with multimodal APIs or local OCR.")
+    parser = argparse.ArgumentParser(description="See images with multimodal APIs or local vision.")
     parser.add_argument("inputs", nargs="*", help="Image file paths or URLs.")
     parser.add_argument("--image", action="append", default=[], help="Image path or URL; repeatable.")
     parser.add_argument("--task", default="", help="Optional focus.")
