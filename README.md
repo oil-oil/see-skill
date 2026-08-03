@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="see 为任何不支持图片的模型补充原生图片理解、自动路由和本地视觉降级">
+  <img src="./assets/readme/hero.svg" width="100%" alt="see 为任何不支持多模态的模型补充原生图片与视频理解">
 </p>
 
-`see` 让任何不支持图片的模型直接使用外部多模态能力查看图片。它把原图和用户问题交给 Qwen3.7 Plus；没有 Key 或云端失败时，自动降级到系统视觉能力。
+`see` 让任何不支持多模态的模型直接查看图片和视频。图片默认交给 Qwen3.7 Plus；视频优先交给 Gemini 3.1 Flash-Lite，平台不可用时使用 Qwen3.7 Plus。
 
 ## 安装
 
@@ -42,6 +42,10 @@ Codex 会启动 onboard。选择供应商后，在隐藏输入框中填写 API K
 比较 before.png 和 after.png 的界面变化
 ```
 
+```text
+总结 /path/to/demo.mp4 的内容
+```
+
 AI 只需要调用一个脚本：
 
 ```bash
@@ -53,11 +57,16 @@ see/scripts/ask_media.sh a.png b.png c.png
 
 # 多图联合理解
 see/scripts/ask_media.sh --together before.png after.png --task "比较界面变化"
+
+# 完整视频理解
+see/scripts/ask_media.sh demo.mp4
 ```
 
 ## 为什么更接近原生视觉
 
-- 原图直接内联发送，不预先 OCR、缩放或压缩。
+- 图片原图直接发送，不预先 OCR、缩放或压缩。
+- 视频保持完整时间线和音频，直接使用模型原生视频能力，不在 Skill 内抽帧。
+- 4K、高帧率或大体积视频自动压缩为清晰的 H.264 MP4，减少上传时间。
 - 用户问题通过 `--task` 原样交给视觉模型，不套固定报告模板。
 - 视觉模型同时理解对象、布局、空间关系、界面状态和文字。
 - 云端结果直接返回给主模型，减少“先泛化描述、再二次推理”的信息损失。
@@ -82,7 +91,18 @@ see/scripts/ask_media.sh --together before.png after.png --task "比较界面变
 | TokenDance | `qwen3.7-plus` | `TOKENDANCE_API_KEY` |
 | 本地 | 系统视觉 / OCR | 不需要 |
 
-自动模式会按照已配置顺序尝试供应商；请求失败后切换下一个，全部失败才进入本地视觉分析。
+图片会按配置顺序尝试供应商，全部失败才进入本地视觉分析；视频使用下方的独立路由。
+
+视频模型自动选择：
+
+| 供应商 | 默认视频模型 | 输入 |
+|---|---|---|
+| ZenMux | `google/gemini-3.1-flash-lite` | 完整视频 + 音频 |
+| OpenRouter | `google/gemini-3.1-flash-lite` | 完整视频 + 音频 |
+| 百炼 | `qwen3.7-plus` | 完整视频 |
+| TokenDance | `qwen3.7-plus` | 完整视频 |
+
+视频不会降级为抽帧；没有支持视频的云端 Key 时会直接提示配置。
 
 ## Onboard 与 Key 保存
 
@@ -131,7 +151,7 @@ macOS 还会返回场景分类、人物/人脸、条码和基础图形结构；�
 | `--together` | 多图放进同一次请求 |
 | `--jobs 4` | 多图并发数 |
 | `--provider NAME` | 临时指定供应商 |
-| `--model NAME` | 临时覆盖模型 |
+| `--model NAME` | 临时覆盖当前媒体模型 |
 | `--ocr-backend system` | 指定本地系统能力 |
 | `-o result.md` | 指定结果文件 |
 
@@ -145,11 +165,13 @@ output_path=/absolute/path/result.md
 
 ## 支持范围
 
-- 支持本地图片和 HTTP / HTTPS 图片 URL。
-- 支持一张或多张图片。
-- 下载上限为 50 MB。
-- 不支持视频、音频和网页视频提取。
+- 支持本地图片、视频和 HTTP / HTTPS URL。
+- 支持多文件并行；`--together` 用于多图联合理解。
+- 视频自动压缩为最长边 1920、2 fps、H.264 和 AAC；超出上传预算时自动切换紧凑档。
+- 下载上限为 512 MB。
+- 不负责网页视频提取。
 - 需要 Python 3；云端调用不依赖第三方 Python 包。
+- 视频压缩需要 FFmpeg。
 
 ## 文件结构
 

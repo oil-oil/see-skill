@@ -29,9 +29,9 @@ def fail(message: str) -> None:
 
 def choose_provider() -> str:
     choices = [*PROVIDER_SPECS, "local"]
-    print("选择视觉方案：")
+    print("选择图片 / 视频方案：")
     for index, provider in enumerate(choices, start=1):
-        suffix = "（不需要 Key，只提供 OCR）" if provider == "local" else ""
+        suffix = "（不需要 Key，仅支持图片本地分析）" if provider == "local" else ""
         print(f"  {index}. {provider}{suffix}")
     while True:
         answer = input("请输入序号：").strip()
@@ -58,7 +58,8 @@ def config_status() -> int:
         if any(values.get(name, "").strip() for name in spec["key_names"]):
             configured.append(provider)
     print(f"已保存 Key：{', '.join(configured) if configured else '无'}")
-    print("本地 OCR：可直接使用")
+    print("视频默认：Gemini 3.1 Flash-Lite；平台不可用时 Qwen3.7 Plus")
+    print("本地图片分析：可直接使用")
     return 0
 
 
@@ -130,7 +131,7 @@ def update_order(values: dict[str, str], preferred: str) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="安全配置 see 的视觉供应商。")
+    parser = argparse.ArgumentParser(description="安全配置 see 的图片与视频供应商。")
     parser.add_argument("--provider", choices=[*PROVIDER_SPECS, "local"])
     parser.add_argument("--key-stdin", action="store_true", help="从标准输入读取 Key，不显示在命令行参数中。")
     parser.add_argument("--model", default="", help="可选模型覆盖。")
@@ -154,7 +155,7 @@ def main() -> int:
         values["SEE_PROVIDER"] = "local"
         path = write_config(values)
         print(f"配置完成：{path}")
-        print("当前使用本地 OCR，不需要 API Key。")
+        print("当前使用本地图片分析，不需要 API Key；视频需要云端 Key。")
         return 0
 
     spec = PROVIDER_SPECS[provider_name]
@@ -193,7 +194,7 @@ def main() -> int:
 
     path = write_config(values)
     print(f"配置完成：{path}")
-    print(f"已保存：{provider_name} / {model}。Key 不会写入 Skill。")
+    print(f"已保存：{provider_name} / {model}。图片和视频可共用此 Key，Key 不会写入 Skill。")
     return 0
 
 

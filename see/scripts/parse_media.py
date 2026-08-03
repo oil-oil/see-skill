@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze images with configured multimodal APIs, then fall back to local vision."""
+"""Analyze images and videos with configured multimodal APIs."""
 
 import argparse
 import base64
@@ -24,11 +24,15 @@ from urllib.parse import urlparse
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".svg"}
+VIDEO_EXTS = {".mp4", ".mov", ".mpeg", ".mpg", ".webm", ".avi", ".mkv", ".wmv", ".flv", ".3gp"}
+MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 DEFAULT_OUTPUT_ROOT = Path.home() / ".local" / "share" / "see" / "outputs"
 SCRIPT_DIR = Path(__file__).resolve().parent
 MACOS_OCR_SCRIPT = SCRIPT_DIR / "ocr_macos.swift"
 WINDOWS_OCR_SCRIPT = SCRIPT_DIR / "ocr_windows.ps1"
-MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+MAX_INLINE_VIDEO_BYTES = 72 * 1024 * 1024
+MAX_STRICT_VIDEO_BYTES = 13 * 1024 * 1024
 
 PROVIDER_SPECS = {
     "zenmux": {
@@ -37,6 +41,11 @@ PROVIDER_SPECS = {
         "base_env": "ZENMUX_BASE_URL",
         "model": "qwen/qwen3.7-plus",
         "model_env": "ZENMUX_MODEL",
+        "video_model": "google/gemini-3.1-flash-lite",
+        "video_model_env": "ZENMUX_VIDEO_MODEL",
+        "video_input": "file",
+        "video_audio": True,
+        "video_max_bytes": MAX_INLINE_VIDEO_BYTES,
     },
     "bailian": {
         "key_names": ("DASHSCOPE_API_KEY", "BAILIAN_API_KEY"),
@@ -44,6 +53,11 @@ PROVIDER_SPECS = {
         "base_env": "BAILIAN_BASE_URL",
         "model": "qwen3.7-plus",
         "model_env": "BAILIAN_MODEL",
+        "video_model": "qwen3.7-plus",
+        "video_model_env": "BAILIAN_VIDEO_MODEL",
+        "video_input": "video_url",
+        "video_audio": False,
+        "video_max_bytes": MAX_INLINE_VIDEO_BYTES,
     },
     "openrouter": {
         "key_names": ("OPENROUTER_API_KEY",),
@@ -51,6 +65,11 @@ PROVIDER_SPECS = {
         "base_env": "OPENROUTER_BASE_URL",
         "model": "qwen/qwen3.7-plus",
         "model_env": "OPENROUTER_MODEL",
+        "video_model": "google/gemini-3.1-flash-lite",
+        "video_model_env": "OPENROUTER_VIDEO_MODEL",
+        "video_input": "video_url",
+        "video_audio": True,
+        "video_max_bytes": MAX_INLINE_VIDEO_BYTES,
     },
     "tokendance": {
         "key_names": ("TOKENDANCE_API_KEY",),
@@ -58,9 +77,15 @@ PROVIDER_SPECS = {
         "base_env": "TOKENDANCE_BASE_URL",
         "model": "qwen3.7-plus",
         "model_env": "TOKENDANCE_MODEL",
+        "video_model": "qwen3.7-plus",
+        "video_model_env": "TOKENDANCE_VIDEO_MODEL",
+        "video_input": "video_url",
+        "video_audio": False,
+        "video_max_bytes": MAX_STRICT_VIDEO_BYTES,
     },
 }
 DEFAULT_PROVIDER_ORDER = ("zenmux", "bailian", "tokendance", "openrouter")
+DEFAULT_VIDEO_PROVIDER_ORDER = ("zenmux", "openrouter", "bailian", "tokendance")
 
 
 @dataclass
@@ -69,6 +94,9 @@ class Provider:
     api_key: str
     base_url: str
     model: str
+    video_input: str = ""
+    video_audio: bool = False
+    video_max_bytes: int = MAX_INLINE_VIDEO_BYTES
 
 
 @dataclass
@@ -145,7 +173,34 @@ def provider_order(provider_arg: str, values: dict[str, str]) -> list[str]:
     return order
 
 
-def resolve_provider(name: str, values: dict[str, str], *, allow_common: bool) -> Provider:
+def video_provider_order(provider_arg: str, values: dict[str, str]) -> list[str]:
+    if provider_arg == "local":
+        return []
+    if provider_arg != "auto":
+        return [provider_arg]
+
+    preferred = setting("SEE_VIDEO_PROVIDER", values).lower()
+    configured = setting("SEE_VIDEO_PROVIDER_ORDER", values)
+    order = [
+        item.strip().lower()
+        for item in (configured.split(",") if configured else DEFAULT_VIDEO_PROVIDER_ORDER)
+        if item.strip() and item.strip().lower() != "local"
+    ]
+    if preferred:
+        order = [preferred, *[item for item in order if item != preferred]]
+    unknown = [item for item in order if item not in PROVIDER_SPECS]
+    if unknown:
+        raise RuntimeError(f"Unknown video provider: {', '.join(unknown)}")
+    return order
+
+
+def resolve_provider(
+    name: str,
+    values: dict[str, str],
+    *,
+    allow_common: bool,
+    video: bool = False,
+) -> Provider:
     spec = PROVIDER_SPECS[name]
     preferred = setting("SEE_PROVIDER", values).lower()
     use_common = allow_common or preferred == name
@@ -163,25 +218,45 @@ def resolve_provider(name: str, values: dict[str, str], *, allow_common: bool) -
             api_key = legacy.read_text(encoding="utf-8", errors="ignore").strip()
 
     base_url = setting(spec["base_env"], values, spec["base_url"])
-    model = setting(spec["model_env"], values, spec["model"])
+    if video:
+        model = setting(spec["video_model_env"], values, spec["video_model"])
+    else:
+        model = setting(spec["model_env"], values, spec["model"])
     if use_common:
         base_url = setting("SEE_BASE_URL", values, base_url)
-        model = setting("SEE_MODEL", values, model)
-    return Provider(name=name, api_key=api_key, base_url=base_url, model=model)
+        model = setting("SEE_VIDEO_MODEL" if video else "SEE_MODEL", values, model)
+    return Provider(
+        name=name,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        video_input=spec["video_input"] if video else "",
+        video_audio=bool(spec["video_audio"]) if video else False,
+        video_max_bytes=int(spec["video_max_bytes"]) if video else MAX_INLINE_VIDEO_BYTES,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Image input
+# Media input
 # ---------------------------------------------------------------------------
 
-def download_image(url: str, destination: Path) -> Path:
+def media_kind(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in IMAGE_EXTS:
+        return "image"
+    if suffix in VIDEO_EXTS:
+        return "video"
+    raise RuntimeError(f"Unsupported media format: {suffix or '(none)'}")
+
+
+def download_media(url: str, destination: Path) -> Path:
     req = request.Request(url, headers={"User-Agent": "see/2.0"})
     total = 0
     with request.urlopen(req, timeout=120) as response:
         content_type = response.headers.get_content_type()
-        if not content_type.startswith("image/"):
-            raise RuntimeError(f"URL is not an image: {content_type}")
-        if destination.suffix == ".img":
+        if not (content_type.startswith("image/") or content_type.startswith("video/")):
+            raise RuntimeError(f"URL is not an image or video: {content_type}")
+        if destination.suffix == ".media":
             suffix = mimetypes.guess_extension(content_type) or ".img"
             destination = destination.with_suffix(".jpg" if suffix == ".jpe" else suffix)
         with destination.open("wb") as output:
@@ -191,32 +266,34 @@ def download_image(url: str, destination: Path) -> Path:
                     break
                 total += len(chunk)
                 if total > MAX_DOWNLOAD_BYTES:
-                    raise RuntimeError("Image download exceeds 50MB")
+                    raise RuntimeError("Media download exceeds 512MB")
                 output.write(chunk)
     return destination
 
 
-def resolve_image(raw: str, tmp_dir: Path, index: int) -> Path:
+def resolve_media(raw: str, tmp_dir: Path, index: int) -> Path:
     path = Path(raw).expanduser()
     if path.is_file():
         path = path.resolve()
-        if path.suffix.lower() not in IMAGE_EXTS:
-            raise RuntimeError(f"Unsupported image format: {path.suffix or '(none)'}")
+        media_kind(path)
         return path
 
     parsed = urlparse(raw)
     if parsed.scheme not in ("http", "https"):
-        raise RuntimeError(f"Image not found as file or URL: {raw}")
+        raise RuntimeError(f"Media not found as file or URL: {raw}")
     suffix = Path(parsed.path).suffix.lower()
-    if suffix not in IMAGE_EXTS:
-        suffix = ".img"
-    return download_image(raw, tmp_dir / f"download-{index}{suffix}")
+    if suffix not in MEDIA_EXTS:
+        suffix = ".media"
+    path = download_media(raw, tmp_dir / f"download-{index}{suffix}")
+    media_kind(path)
+    return path
 
 
 def data_url(path: Path) -> str:
     mime, _ = mimetypes.guess_type(path.name)
-    if not mime or not mime.startswith("image/"):
-        mime = "image/png"
+    kind = media_kind(path)
+    if not mime or not mime.startswith(f"{kind}/"):
+        mime = "image/png" if kind == "image" else "video/mp4"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime};base64,{encoded}"
 
@@ -230,31 +307,61 @@ def safe_error(exc: Exception) -> str:
     return message.replace("\n", " ")[:300]
 
 
-def system_prompt() -> str:
+def system_prompt(kind: str) -> str:
+    if kind == "video":
+        return (
+            "直接理解完整视频。结合连续画面、屏幕文字、操作过程和可用音频回答；"
+            "重要节点使用 MM:SS 时间戳。不要编造；看不清、听不清或不确定时明确说明。"
+            "根据用户的问题自然组织回答，不要解释上传或处理过程。"
+        )
     return (
         "直接观察图片并回答用户的问题。综合理解整个画面、对象、空间关系、界面状态和可见文字，"
         "不要只做文字识别。不要编造；看不清或不确定时明确说明。根据用户的问题自然组织回答。"
     )
 
 
-def user_prompt(task: str, image_count: int) -> str:
+def user_prompt(task: str, media_count: int, kind: str) -> str:
     if task.strip():
         return task.strip()
-    if image_count > 1:
+    if kind == "video":
+        return (
+            "请完整解析这个视频，概括主题，并按时间线说明画面、屏幕文字、操作步骤、"
+            "口播或音频信息、关键结论；重要节点标注 MM:SS。"
+        )
+    if media_count > 1:
         return "请联合查看这些图片，说明它们的重要内容、可见文字、相互关系和关键差异。"
     return "请查看并描述这张图片，说明重要内容和可见文字。"
 
 
-def call_provider(provider: Provider, images: list[Path], task: str, retries: int = 3) -> str:
-    content = [{"type": "text", "text": user_prompt(task, len(images))}]
-    content.extend(
-        {"type": "image_url", "image_url": {"url": data_url(image)}}
-        for image in images
-    )
+def call_provider(provider: Provider, media: list[Path], task: str, retries: int = 3) -> str:
+    kinds = {media_kind(path) for path in media}
+    if len(kinds) != 1:
+        raise RuntimeError("A single request cannot mix images and videos")
+    kind = kinds.pop()
+
+    if kind == "video":
+        content = []
+        for video in media:
+            encoded = data_url(video)
+            if provider.video_input == "file":
+                content.append({
+                    "type": "file",
+                    "file": {"filename": video.name, "file_data": encoded},
+                })
+            else:
+                content.append({"type": "video_url", "video_url": {"url": encoded}})
+        content.append({"type": "text", "text": user_prompt(task, len(media), kind)})
+    else:
+        content = [{"type": "text", "text": user_prompt(task, len(media), kind)}]
+        content.extend(
+            {"type": "image_url", "image_url": {"url": data_url(image)}}
+            for image in media
+        )
+
     payload = json.dumps({
         "model": provider.model,
         "messages": [
-            {"role": "system", "content": system_prompt()},
+            {"role": "system", "content": system_prompt(kind)},
             {"role": "user", "content": content},
         ],
     }).encode()
@@ -295,6 +402,154 @@ def call_provider(provider: Provider, images: list[Path], task: str, retries: in
         if attempt < retries:
             time.sleep(min(8, attempt * 2))
     raise RuntimeError(f"{provider.name} request failed: {last_error}")
+
+
+# ---------------------------------------------------------------------------
+# Video preparation
+# ---------------------------------------------------------------------------
+
+def parse_rate(value: str) -> float:
+    try:
+        if "/" in value:
+            numerator, denominator = value.split("/", 1)
+            return float(numerator) / float(denominator)
+        return float(value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def probe_video(path: Path) -> dict[str, Any]:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise RuntimeError("ffprobe is unavailable; install ffmpeg to prepare videos")
+    result = run_json([
+        ffprobe,
+        "-v", "error",
+        "-show_entries",
+        "format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate",
+        "-of", "json",
+        str(path),
+    ])
+    streams = result.get("streams", [])
+    video = next((item for item in streams if item.get("codec_type") == "video"), {})
+    audio = next((item for item in streams if item.get("codec_type") == "audio"), {})
+    if not video:
+        raise RuntimeError("No video stream found")
+    return {
+        "duration": float(result.get("format", {}).get("duration") or 0),
+        "size": int(result.get("format", {}).get("size") or path.stat().st_size),
+        "width": int(video.get("width") or 0),
+        "height": int(video.get("height") or 0),
+        "fps": parse_rate(video.get("r_frame_rate", "0")),
+        "video_codec": video.get("codec_name", ""),
+        "audio_codec": audio.get("codec_name", ""),
+        "has_audio": bool(audio),
+    }
+
+
+def encode_video(source: Path, destination: Path, profile: str) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is unavailable; install ffmpeg to prepare videos")
+
+    if profile == "balanced":
+        max_dimension, fps, crf, audio_rate = 1920, 2, 20, "96k"
+    elif profile == "compact":
+        max_dimension, fps, crf, audio_rate = 1600, 1, 22, "64k"
+    else:
+        max_dimension, fps, crf, audio_rate = 1120, 1, 25, "48k"
+
+    scale = (
+        f"scale='if(gt(iw,ih),min({max_dimension},iw),-2)':"
+        f"'if(gt(iw,ih),-2,min({max_dimension},ih))':flags=lanczos"
+    )
+    subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(source),
+            "-map", "0:v:0", "-map", "0:a?",
+            "-vf", f"fps={fps},{scale}",
+            "-c:v", "libx264", "-preset", "fast", "-crf", str(crf),
+            "-tune", "stillimage", "-pix_fmt", "yuv420p", "-g", str(fps * 2),
+            "-c:a", "aac", "-b:a", audio_rate, "-ac", "1",
+            "-map_metadata", "-1", "-movflags", "+faststart",
+            str(destination),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+
+
+def prepare_video(path: Path, tmp_dir: Path, index: int) -> tuple[Path, dict[str, Any]]:
+    original = probe_video(path)
+    needs_compression = (
+        original["size"] > MAX_INLINE_VIDEO_BYTES
+        or max(original["width"], original["height"]) > 1920
+        or original["fps"] > 2.01
+        or original["video_codec"] != "h264"
+        or (original["has_audio"] and original["audio_codec"] != "aac")
+        or path.suffix.lower() != ".mp4"
+    )
+    if not needs_compression:
+        return path, {
+            **original,
+            "profile": "original",
+            "original_size": original["size"],
+            "upload_size": original["size"],
+        }
+
+    prepared = tmp_dir / f"prepared-video-{index}.mp4"
+    profile = "balanced"
+    print(
+        f"[video {index}] preparing {original['width']}x{original['height']} / "
+        f"{original['fps']:.1f} fps / {size_mb(original['size'])}",
+        file=sys.stderr,
+    )
+    encode_video(path, prepared, profile)
+    if prepared.stat().st_size > MAX_INLINE_VIDEO_BYTES:
+        profile = "compact"
+        encode_video(path, prepared, profile)
+    uploaded = probe_video(prepared)
+    return prepared, {
+        **uploaded,
+        "profile": profile,
+        "original_size": original["size"],
+        "original_width": original["width"],
+        "original_height": original["height"],
+        "original_fps": original["fps"],
+        "upload_size": uploaded["size"],
+    }
+
+
+def size_mb(value: int) -> str:
+    return f"{value / 1024 / 1024:.1f} MB"
+
+
+def video_report(text: str, info: dict[str, Any], audio_supported: bool) -> str:
+    if info["profile"] == "original":
+        preparation = (
+            f"保留原文件 · {info['width']}×{info['height']} · "
+            f"{info['fps']:.1f} fps · {size_mb(info['upload_size'])}"
+        )
+    else:
+        preparation = (
+            f"{info['original_width']}×{info['original_height']} / {info['original_fps']:.1f} fps / "
+            f"{size_mb(info['original_size'])} → {info['width']}×{info['height']} / "
+            f"{info['fps']:.1f} fps / {size_mb(info['upload_size'])}"
+        )
+    audio_note = "含音频理解" if audio_supported else "该模型主要理解视频画面"
+    return "\n".join([
+        "# 视频解析",
+        "> 完整视频原生输入模型，未由 Skill 抽帧。",
+        "",
+        f"- 上传预处理：{preparation}",
+        f"- 输入能力：{audio_note}",
+        "",
+        text.strip(),
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +810,91 @@ def route_image(
     return fallback
 
 
+def route_video(
+    path: Path,
+    index: int,
+    info: dict[str, Any],
+    tmp_dir: Path,
+    values: dict[str, str],
+    order: list[str],
+    task: str,
+    base_url_override: str,
+    model_override: str,
+) -> Result:
+    attempts: list[dict[str, str]] = []
+    configured = 0
+    override_applied = False
+    strict_path: Path | None = None
+    strict_info: dict[str, Any] | None = None
+
+    for name in order:
+        provider = resolve_provider(name, values, allow_common=len(order) == 1, video=True)
+        if not provider.api_key:
+            attempts.append({"provider": name, "status": "skipped", "detail": "API key not configured"})
+            continue
+        configured += 1
+        if not override_applied:
+            provider.base_url = base_url_override.strip() or provider.base_url
+            provider.model = model_override.strip() or provider.model
+            override_applied = True
+        try:
+            candidate_path = path
+            candidate_info = info
+            if info["upload_size"] > provider.video_max_bytes:
+                if strict_path is None or strict_info is None:
+                    strict_path = tmp_dir / f"prepared-video-{index}-strict.mp4"
+                    print(
+                        f"[video {index}] preparing strict upload for {name}",
+                        file=sys.stderr,
+                    )
+                    encode_video(path, strict_path, "strict")
+                    uploaded = probe_video(strict_path)
+                    strict_info = {
+                        **uploaded,
+                        "profile": "strict",
+                        "original_size": info.get("original_size", info["upload_size"]),
+                        "original_width": info.get("original_width", info["width"]),
+                        "original_height": info.get("original_height", info["height"]),
+                        "original_fps": info.get("original_fps", info["fps"]),
+                        "upload_size": uploaded["size"],
+                    }
+                candidate_path = strict_path
+                candidate_info = strict_info
+            if candidate_info["upload_size"] > provider.video_max_bytes:
+                raise RuntimeError(
+                    f"Prepared video is still too large for {name}: "
+                    f"{size_mb(candidate_info['upload_size'])}"
+                )
+            print(
+                f"[video {index}] {name} / {provider.model} / "
+                f"{size_mb(candidate_info['upload_size'])}",
+                file=sys.stderr,
+            )
+            text = call_provider(provider, [candidate_path], task)
+            detail = (
+                f"{provider.model}; {candidate_info['profile']}; "
+                f"{size_mb(candidate_info['upload_size'])}"
+            )
+            attempts.append({"provider": name, "status": "success", "detail": detail})
+            return Result(
+                video_report(text, candidate_info, provider.video_audio),
+                name,
+                provider.model,
+                attempts,
+            )
+        except Exception as exc:
+            detail = safe_error(exc)
+            attempts.append({"provider": name, "status": "failed", "detail": detail})
+            print(f"[video {index}] {name} failed: {detail}", file=sys.stderr)
+
+    if configured == 0:
+        raise RuntimeError(
+            "Video analysis needs a configured cloud provider. "
+            "Run: python3 scripts/onboard.py"
+        )
+    raise RuntimeError("All configured providers failed to analyze the video")
+
+
 def route_together(
     paths: list[Path],
     values: dict[str, str],
@@ -617,15 +957,16 @@ def unique_join(values: list[str]) -> str:
 
 
 def strip_title(text: str) -> str:
-    return re.sub(r"^# (?:图片解析|图片本地 OCR|图片本地分析)\s*", "", text.strip())
+    return re.sub(r"^# (?:图片解析|图片本地 OCR|图片本地分析|视频解析)\s*", "", text.strip())
 
 
 def combined_report(paths: list[Path], results: list[Result]) -> str:
     if len(results) == 1:
         return results[0].text.strip()
-    sections = ["# 多图并行解析", f"> 已并行查看 {len(results)} 张图片。"]
+    sections = ["# 多媒体并行解析", f"> 已并行查看 {len(results)} 个媒体文件。"]
     for index, (path, result) in enumerate(zip(paths, results), start=1):
-        sections.extend(["", f"## 图片 {index}：{path.name}", strip_title(result.text)])
+        label = "视频" if media_kind(path) == "video" else "图片"
+        sections.extend(["", f"## {label} {index}：{path.name}", strip_title(result.text)])
     return "\n".join(sections).strip()
 
 
@@ -638,7 +979,7 @@ def slug(value: str) -> str:
     return (value or "images")[:80]
 
 
-def output_path(output: str, name: str, raw_inputs: list[str]) -> Path:
+def output_path(output: str, name: str, raw_inputs: list[str], kinds: list[str]) -> Path:
     if output:
         return Path(output).expanduser().resolve()
     root = Path(os.getenv("SEE_OUTPUT_DIR", str(DEFAULT_OUTPUT_ROOT))).expanduser()
@@ -647,7 +988,8 @@ def output_path(output: str, name: str, raw_inputs: list[str]) -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     source = name or Path(urlparse(raw_inputs[0]).path).stem or "images"
     suffix = f"-plus-{len(raw_inputs) - 1}" if len(raw_inputs) > 1 else ""
-    return (day / f"{timestamp}__image__{slug(source + suffix)}.md").resolve()
+    kind = kinds[0] if len(set(kinds)) == 1 else "media"
+    return (day / f"{timestamp}__{kind}__{slug(source + suffix)}.md").resolve()
 
 
 def frontmatter(
@@ -687,16 +1029,16 @@ def frontmatter(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="See images with multimodal APIs or local vision.")
-    parser.add_argument("inputs", nargs="*", help="Image file paths or URLs.")
-    parser.add_argument("--image", action="append", default=[], help="Image path or URL; repeatable.")
+    parser = argparse.ArgumentParser(description="See images and videos with multimodal APIs.")
+    parser.add_argument("inputs", nargs="*", help="Image or video paths/URLs.")
+    parser.add_argument("--image", action="append", default=[], help="Media path or URL; repeatable.")
     parser.add_argument("--task", default="", help="Optional focus.")
     parser.add_argument("--provider", choices=["auto", *PROVIDER_SPECS, "local"], default="auto")
     parser.add_argument("--model", default="", help="Model override.")
     parser.add_argument("--base-url", default="", help="Base URL override.")
     parser.add_argument("--ocr-backend", choices=["auto", "system", "tesseract"], default=os.getenv("SEE_OCR_BACKEND", "auto"))
     parser.add_argument("--ocr-languages", default=os.getenv("SEE_OCR_LANGUAGES", ""))
-    parser.add_argument("--jobs", type=int, default=int(os.getenv("SEE_JOBS", "4")), help="Parallel image jobs.")
+    parser.add_argument("--jobs", type=int, default=int(os.getenv("SEE_JOBS", "4")), help="Parallel media jobs.")
     parser.add_argument("--together", action="store_true", help="Analyze all images together in one multimodal request.")
     parser.add_argument("--name", default="", help="Output name.")
     parser.add_argument("-o", "--output", default="", help="Output Markdown path.")
@@ -713,19 +1055,49 @@ def main() -> int:
             raise RuntimeError("--jobs must be greater than 0")
 
         values = config_values()
-        order = provider_order(args.provider, values)
+        image_order = provider_order(args.provider, values)
+        video_order = video_provider_order(args.provider, values)
         jobs = min(args.jobs, len(raw_inputs))
 
         with tempfile.TemporaryDirectory(prefix="see-") as tmp:
             tmp_dir = Path(tmp)
-            paths = [resolve_image(raw, tmp_dir, index) for index, raw in enumerate(raw_inputs, start=1)]
+            paths = [
+                resolve_media(raw, tmp_dir, index)
+                for index, raw in enumerate(raw_inputs, start=1)
+            ]
+            kinds = [media_kind(path) for path in paths]
+            if "video" in kinds and not any(
+                resolve_provider(
+                    name,
+                    values,
+                    allow_common=len(video_order) == 1,
+                    video=True,
+                ).api_key
+                for name in video_order
+            ):
+                raise RuntimeError(
+                    "Video analysis needs a configured cloud provider. "
+                    "Run: python3 scripts/onboard.py"
+                )
+            prepared: list[Path] = []
+            video_infos: list[dict[str, Any]] = []
+            for index, (path, kind) in enumerate(zip(paths, kinds), start=1):
+                if kind == "video":
+                    ready, info = prepare_video(path, tmp_dir, index)
+                    prepared.append(ready)
+                    video_infos.append(info)
+                else:
+                    prepared.append(path)
+                    video_infos.append({})
 
             if args.together and len(paths) > 1:
+                if any(kind == "video" for kind in kinds):
+                    raise RuntimeError("Use videos without --together; multiple videos run in parallel")
                 results = [
                     route_together(
-                        paths=paths,
+                        paths=prepared,
                         values=values,
-                        order=order,
+                        order=image_order,
                         task=args.task,
                         tmp_dir=tmp_dir,
                         ocr_backend=args.ocr_backend,
@@ -738,13 +1110,25 @@ def main() -> int:
                 mode = "together"
                 report = results[0].text.strip()
             else:
-                def analyze(item: tuple[int, Path]) -> Result:
-                    index, path = item
+                def analyze(item: tuple[int, Path, str, dict[str, Any]]) -> Result:
+                    index, path, kind, info = item
+                    if kind == "video":
+                        return route_video(
+                            path=path,
+                            index=index,
+                            info=info,
+                            tmp_dir=tmp_dir,
+                            values=values,
+                            order=video_order,
+                            task=args.task,
+                            base_url_override=args.base_url,
+                            model_override=args.model,
+                        )
                     return route_image(
                         path=path,
                         index=index,
                         values=values,
-                        order=order,
+                        order=image_order,
                         task=args.task,
                         tmp_dir=tmp_dir,
                         ocr_backend=args.ocr_backend,
@@ -754,11 +1138,18 @@ def main() -> int:
                     )
 
                 with ThreadPoolExecutor(max_workers=jobs) as executor:
-                    results = list(executor.map(analyze, enumerate(paths, start=1)))
+                    work = [
+                        (index, path, kind, info)
+                        for index, (path, kind, info) in enumerate(
+                            zip(prepared, kinds, video_infos),
+                            start=1,
+                        )
+                    ]
+                    results = list(executor.map(analyze, work))
                 mode = "parallel" if len(paths) > 1 else "single"
                 report = combined_report(paths, results)
 
-            destination = output_path(args.output, args.name, raw_inputs)
+            destination = output_path(args.output, args.name, raw_inputs, kinds)
             destination.parent.mkdir(parents=True, exist_ok=True)
             content = (
                 frontmatter(raw_inputs, destination.name, results, args.task, jobs, mode)
