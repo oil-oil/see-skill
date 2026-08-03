@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="see 为 DeepSeek 等纯文本模型补充原生图片理解、自动路由和本地 OCR 降级">
+  <img src="./assets/readme/hero.svg" width="100%" alt="see 为任何不支持图片的模型补充原生图片理解、自动路由和本地 OCR 降级">
 </p>
 
-`see` 让 DeepSeek 等纯文本模型直接使用外部多模态能力查看图片。它把原图和用户问题交给 Qwen3.7 Plus；没有 Key 或云端失败时，自动降级到系统 OCR。
+`see` 让任何不支持图片的模型直接使用外部多模态能力查看图片。它把原图和用户问题交给 Qwen3.7 Plus；没有 Key 或云端失败时，自动降级到系统 OCR。
 
 ## 安装
 

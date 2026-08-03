@@ -21,8 +21,8 @@
 
     <g id="text-model" transform="translate(28 28)">
       <rect width="126" height="58" rx="14" fill="#102722"/>
-      <text x="63" y="25" text-anchor="middle" fill="#8DA69B" font-size="18" font-weight="650">TEXT MODEL</text>
-      <text x="63" y="47" text-anchor="middle" fill="#F4FBF7" font-size="20" font-weight="750">DeepSeek</text>
+      <text x="63" y="25" text-anchor="middle" fill="#8DA69B" font-size="18" font-weight="650">NO VISION</text>
+      <text x="63" y="47" text-anchor="middle" fill="#F4FBF7" font-size="20" font-weight="750">ANY MODEL</text>
     </g>
 
     <path d="M154 57H194" stroke="#5EE7B1" stroke-width="3"/>
