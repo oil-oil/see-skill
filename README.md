@@ -165,3 +165,7 @@ see/
     ├── ocr_macos.swift
     └── ocr_windows.ps1
 ```
+
+## License
+
+[MIT](./LICENSE) © 2026 oil-oil
