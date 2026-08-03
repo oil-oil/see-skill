@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Parse image/video files (local or URL) via ZenMux API."""
+"""Analyze images with configured multimodal APIs, then fall back to local OCR."""
 
 import argparse
 import base64
+import csv
+import io
 import json
 import mimetypes
 import os
@@ -12,487 +14,703 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import Any
 from urllib import error, request
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".svg"}
-VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".flv", ".m4v", ".ts"}
-DEFAULT_BASE_URL = "https://zenmux.ai/api/v1"
-DEFAULT_MODEL = "google/gemini-3-flash-preview"
 DEFAULT_OUTPUT_ROOT = Path.home() / ".local" / "share" / "see" / "outputs"
+SCRIPT_DIR = Path(__file__).resolve().parent
+MACOS_OCR_SCRIPT = SCRIPT_DIR / "ocr_macos.swift"
+WINDOWS_OCR_SCRIPT = SCRIPT_DIR / "ocr_windows.ps1"
+MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+
+PROVIDER_SPECS = {
+    "zenmux": {
+        "key_names": ("ZENMUX_API_KEY",),
+        "base_url": "https://zenmux.ai/api/v1",
+        "base_env": "ZENMUX_BASE_URL",
+        "model": "qwen/qwen3.7-plus",
+        "model_env": "ZENMUX_MODEL",
+    },
+    "bailian": {
+        "key_names": ("DASHSCOPE_API_KEY", "BAILIAN_API_KEY"),
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "base_env": "BAILIAN_BASE_URL",
+        "model": "qwen3.7-plus",
+        "model_env": "BAILIAN_MODEL",
+    },
+    "openrouter": {
+        "key_names": ("OPENROUTER_API_KEY",),
+        "base_url": "https://openrouter.ai/api/v1",
+        "base_env": "OPENROUTER_BASE_URL",
+        "model": "qwen/qwen3.7-plus",
+        "model_env": "OPENROUTER_MODEL",
+    },
+    "tokendance": {
+        "key_names": ("TOKENDANCE_API_KEY",),
+        "base_url": "https://tokendance.space/gateway/v1",
+        "base_env": "TOKENDANCE_BASE_URL",
+        "model": "qwen3.7-plus",
+        "model_env": "TOKENDANCE_MODEL",
+    },
+}
+DEFAULT_PROVIDER_ORDER = ("zenmux", "bailian", "tokendance", "openrouter")
+
+
+@dataclass
+class Provider:
+    name: str
+    api_key: str
+    base_url: str
+    model: str
+
+
+@dataclass
+class Result:
+    text: str
+    backend: str
+    model: str
+    attempts: list[dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------
-# API key resolution
+# Configuration
 # ---------------------------------------------------------------------------
 
-def _read_env_value(path: Path, key: str) -> str:
+def read_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
     if not path.is_file():
-        return ""
+        return values
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
-        k, v = s.split("=", 1)
-        if k.strip() == key:
-            val = v.strip().strip("'").strip('"')
-            if val:
-                return val
-    return ""
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key and value:
+            values[key] = value
+    return values
 
 
-def resolve_api_key() -> str:
-    env = os.getenv("ZENMUX_API_KEY", "").strip()
-    if env:
-        return env
-    cur = Path.cwd().resolve()
-    for d in [cur, *cur.parents]:
-        found = _read_env_value(d / ".env.local", "ZENMUX_API_KEY")
-        if found:
-            return found
-    gf = Path.home() / ".config" / "see" / "api_key"
-    if gf.is_file():
-        val = gf.read_text(encoding="utf-8", errors="ignore").strip()
-        if val:
-            return val
-    return ""
+def config_file_path() -> Path:
+    override = os.getenv("SEE_CONFIG_FILE", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if os.name == "nt":
+        root = Path(os.getenv("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+    else:
+        root = Path(os.getenv("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+    return root / "see" / "config.env"
 
 
-# ---------------------------------------------------------------------------
-# URL / download helpers
-# ---------------------------------------------------------------------------
-
-def _guess_media_type(url: str) -> str:
-    path = urlparse(url).path.lower()
-    ext = Path(path).suffix.split("?")[0]
-    if ext in IMAGE_EXTS:
-        return "image"
-    if ext in VIDEO_EXTS:
-        return "video"
-    return "unknown"
+def config_values() -> dict[str, str]:
+    values = read_env_file(config_file_path())
+    current = Path.cwd().resolve()
+    for directory in reversed([current, *current.parents]):
+        values.update(read_env_file(directory / ".env.local"))
+    return values
 
 
-def _download_file(url: str, dest: Path, timeout: int = 120) -> None:
-    req = request.Request(url, headers={"User-Agent": "see/1.0"})
-    with request.urlopen(req, timeout=timeout) as resp:
-        dest.write_bytes(resp.read())
+def setting(name: str, values: dict[str, str], default: str = "") -> str:
+    return os.getenv(name, "").strip() or values.get(name, "").strip() or default
 
 
-def _try_ytdlp(url: str, dest_dir: Path) -> Path:
-    if shutil.which("yt-dlp") is None:
-        raise RuntimeError("yt-dlp is not installed. Install it with: brew install yt-dlp")
-    out_template = str(dest_dir / "downloaded.%(ext)s")
-    cmd = [
-        "yt-dlp",
-        "--no-playlist",
-        "-f", "best[filesize<100M]/best",
-        "-o", out_template,
-        "--no-warnings",
-        "-q",
-        url,
+def provider_order(provider_arg: str, values: dict[str, str]) -> list[str]:
+    if provider_arg == "local":
+        return []
+    if provider_arg != "auto":
+        return [provider_arg]
+
+    preferred = setting("SEE_PROVIDER", values).lower()
+    if preferred == "local":
+        return []
+    configured = setting("SEE_PROVIDER_ORDER", values)
+    order = [
+        item.strip().lower()
+        for item in (configured.split(",") if configured else DEFAULT_PROVIDER_ORDER)
+        if item.strip() and item.strip().lower() != "local"
     ]
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
-    for file_path in dest_dir.iterdir():
-        if file_path.name.startswith("downloaded.") and file_path.is_file():
-            return file_path
-    raise RuntimeError(f"yt-dlp did not produce a file for: {url}")
+    if preferred:
+        order = [preferred, *[item for item in order if item != preferred]]
+    unknown = [item for item in order if item not in PROVIDER_SPECS]
+    if unknown:
+        raise RuntimeError(f"Unknown provider: {', '.join(unknown)}")
+    return order
 
 
-def resolve_input(raw: str, tmp_dir: Path) -> tuple[str, Path]:
-    path = Path(raw).expanduser().resolve()
+def resolve_provider(name: str, values: dict[str, str], *, allow_common: bool) -> Provider:
+    spec = PROVIDER_SPECS[name]
+    preferred = setting("SEE_PROVIDER", values).lower()
+    use_common = allow_common or preferred == name
+
+    api_key = ""
+    for key_name in spec["key_names"]:
+        api_key = setting(key_name, values)
+        if api_key:
+            break
+    if not api_key and use_common:
+        api_key = setting("SEE_API_KEY", values)
+    if name == "zenmux" and not api_key:
+        legacy = Path.home() / ".config" / "see" / "api_key"
+        if legacy.is_file():
+            api_key = legacy.read_text(encoding="utf-8", errors="ignore").strip()
+
+    base_url = setting(spec["base_env"], values, spec["base_url"])
+    model = setting(spec["model_env"], values, spec["model"])
+    if use_common:
+        base_url = setting("SEE_BASE_URL", values, base_url)
+        model = setting("SEE_MODEL", values, model)
+    return Provider(name=name, api_key=api_key, base_url=base_url, model=model)
+
+
+# ---------------------------------------------------------------------------
+# Image input
+# ---------------------------------------------------------------------------
+
+def download_image(url: str, destination: Path) -> Path:
+    req = request.Request(url, headers={"User-Agent": "see/2.0"})
+    total = 0
+    with request.urlopen(req, timeout=120) as response:
+        content_type = response.headers.get_content_type()
+        if not content_type.startswith("image/"):
+            raise RuntimeError(f"URL is not an image: {content_type}")
+        if destination.suffix == ".img":
+            suffix = mimetypes.guess_extension(content_type) or ".img"
+            destination = destination.with_suffix(".jpg" if suffix == ".jpe" else suffix)
+        with destination.open("wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_DOWNLOAD_BYTES:
+                    raise RuntimeError("Image download exceeds 50MB")
+                output.write(chunk)
+    return destination
+
+
+def resolve_image(raw: str, tmp_dir: Path, index: int) -> Path:
+    path = Path(raw).expanduser()
     if path.is_file():
-        ext = path.suffix.lower()
-        if ext in IMAGE_EXTS:
-            return ("image", path)
-        return ("video", path)
+        path = path.resolve()
+        if path.suffix.lower() not in IMAGE_EXTS:
+            raise RuntimeError(f"Unsupported image format: {path.suffix or '(none)'}")
+        return path
 
     parsed = urlparse(raw)
     if parsed.scheme not in ("http", "https"):
-        raise RuntimeError(f"Input not found as file or URL: {raw}")
+        raise RuntimeError(f"Image not found as file or URL: {raw}")
+    suffix = Path(parsed.path).suffix.lower()
+    if suffix not in IMAGE_EXTS:
+        suffix = ".img"
+    return download_image(raw, tmp_dir / f"download-{index}{suffix}")
 
-    media_type = _guess_media_type(raw)
-    if media_type == "image":
-        dest = tmp_dir / f"download{Path(parsed.path).suffix or '.bin'}"
-        _download_file(raw, dest)
-        return ("image", dest)
 
-    if media_type == "video":
-        dest = tmp_dir / f"download{Path(parsed.path).suffix or '.bin'}"
-        _download_file(raw, dest)
-        return ("video", dest)
-
-    try:
-        vpath = _try_ytdlp(raw, tmp_dir)
-        return ("video", vpath)
-    except Exception:
-        dest = tmp_dir / "download"
-        _download_file(raw, dest)
-        mime, _ = mimetypes.guess_type(raw)
-        if mime and mime.startswith("image"):
-            return ("image", dest)
-        return ("video", dest)
+def data_url(path: Path) -> str:
+    mime, _ = mimetypes.guess_type(path.name)
+    if not mime or not mime.startswith("image/"):
+        mime = "image/png"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 # ---------------------------------------------------------------------------
-# ZenMux API call
+# Cloud multimodal API
 # ---------------------------------------------------------------------------
 
-def call_zenmux(*, base_url: str, api_key: str, model: str, messages: list, timeout_sec: int = 600, retries: int = 3) -> str:
-    payload = json.dumps({"model": model, "messages": messages}).encode()
-    endpoint = f"{base_url.rstrip('/')}/chat/completions"
-    req = request.Request(
-        endpoint,
-        data=payload,
-        method="POST",
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+def safe_error(exc: Exception) -> str:
+    message = re.sub(r"(?i)(bearer|api[_-]?key)[ =:]+[^\s,;]+", r"\1=***", str(exc))
+    return message.replace("\n", " ")[:300]
+
+
+def system_prompt() -> str:
+    return (
+        "直接观察图片并回答用户的问题。综合理解整个画面、对象、空间关系、界面状态和可见文字，"
+        "不要只做文字识别。不要编造；看不清或不确定时明确说明。根据用户的问题自然组织回答。"
     )
-    last_err = None
-    raw = ""
-    status = 0
+
+
+def user_prompt(task: str, image_count: int) -> str:
+    if task.strip():
+        return task.strip()
+    if image_count > 1:
+        return "请联合查看这些图片，说明它们的重要内容、可见文字、相互关系和关键差异。"
+    return "请查看并描述这张图片，说明重要内容和可见文字。"
+
+
+def call_provider(provider: Provider, images: list[Path], task: str, retries: int = 3) -> str:
+    content = [{"type": "text", "text": user_prompt(task, len(images))}]
+    content.extend(
+        {"type": "image_url", "image_url": {"url": data_url(image)}}
+        for image in images
+    )
+    payload = json.dumps({
+        "model": provider.model,
+        "messages": [
+            {"role": "system", "content": system_prompt()},
+            {"role": "user", "content": content},
+        ],
+    }).encode()
+    endpoint = f"{provider.base_url.rstrip('/')}/chat/completions"
+    last_error: Exception | None = None
+
     for attempt in range(1, retries + 1):
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {provider.api_key}"}
+        if provider.name == "openrouter":
+            headers["HTTP-Referer"] = "https://github.com/oil-oil/see-skill"
+            headers["X-Title"] = "see-skill"
+        req = request.Request(endpoint, data=payload, method="POST", headers=headers)
         try:
-            with request.urlopen(req, timeout=timeout_sec) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-                status = resp.getcode()
-            break
+            with request.urlopen(req, timeout=600) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+            body = json.loads(raw)
+            choices = body.get("choices", [])
+            if not choices:
+                raise RuntimeError(f"No choices in response: {raw}")
+            content = choices[0].get("message", {}).get("content")
+            if isinstance(content, list):
+                content = "\n".join(
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
+            text = (content or "").strip()
+            if not text:
+                raise RuntimeError(f"No text in response: {raw}")
+            return text
         except error.HTTPError as exc:
-            last_err = RuntimeError(f"ZenMux HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}")
-        except error.URLError as exc:
-            last_err = RuntimeError(f"ZenMux request failed: {exc}")
+            body = exc.read().decode("utf-8", errors="replace")
+            last_error = RuntimeError(f"{provider.name} HTTP {exc.code}: {body}")
+            if exc.code in (400, 401, 403, 404, 422):
+                raise last_error
+        except (error.URLError, json.JSONDecodeError, RuntimeError) as exc:
+            last_error = exc
         if attempt < retries:
             time.sleep(min(8, attempt * 2))
-        elif last_err:
-            raise last_err
-
-    if status < 200 or status >= 300:
-        raise RuntimeError(f"ZenMux HTTP {status}: {raw}")
-
-    data = json.loads(raw)
-    choices = data.get("choices", [])
-    if not choices:
-        raise RuntimeError(f"No choices in response: {raw}")
-    content = choices[0].get("message", {}).get("content")
-    if isinstance(content, list):
-        return "\n".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        ).strip()
-    return (content or "").strip()
+    raise RuntimeError(f"{provider.name} request failed: {last_error}")
 
 
 # ---------------------------------------------------------------------------
-# File encoding / video compression
+# Local OCR
 # ---------------------------------------------------------------------------
 
-def encode_data_url(path: Path) -> str:
-    mime, _ = mimetypes.guess_type(path.name)
-    if not mime:
-        mime = "application/octet-stream"
-    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+def run_json(command: list[str], timeout: int = 180) -> dict[str, Any]:
+    result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=timeout)
+    return json.loads(result.stdout)
 
 
-def file_size_mb(path: Path) -> float:
-    return path.stat().st_size / (1024 * 1024)
+def macos_ocr(path: Path) -> dict[str, Any]:
+    swift = shutil.which("swift")
+    if sys.platform != "darwin" or not swift:
+        raise RuntimeError("macOS Vision OCR is unavailable")
+    return run_json([swift, str(MACOS_OCR_SCRIPT), str(path)])
 
 
-def _video_duration(path: Path) -> float:
-    result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
-        check=True,
-        capture_output=True,
-        text=True,
+def windows_ocr(path: Path) -> dict[str, Any]:
+    powershell = next(
+        (found for name in ("powershell.exe", "pwsh.exe", "pwsh", "powershell") if (found := shutil.which(name))),
+        "",
     )
-    return float(result.stdout.strip())
+    if sys.platform != "win32" or not powershell:
+        raise RuntimeError("Windows OCR is unavailable")
+    return run_json([
+        powershell, "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", str(WINDOWS_OCR_SCRIPT), "-ImagePath", str(path),
+    ])
 
 
-def compress_video(video: Path, target_mb: int) -> Path:
-    for cmd_name in ("ffmpeg", "ffprobe"):
-        if shutil.which(cmd_name) is None:
-            raise RuntimeError(f"{cmd_name} not found. Install with: brew install ffmpeg")
+def tesseract_languages(requested: str) -> str:
+    if requested.strip():
+        return requested.strip().replace(",", "+")
+    result = subprocess.run(
+        ["tesseract", "--list-langs"], check=True, capture_output=True, text=True, timeout=30
+    )
+    available = {
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip() and not line.lower().startswith("list of available")
+    }
+    preferred = [lang for lang in ("chi_sim", "chi_tra", "eng") if lang in available]
+    if preferred:
+        return "+".join(preferred)
+    if available:
+        return sorted(available)[0]
+    raise RuntimeError("Tesseract has no language data")
 
-    duration = max(1.0, _video_duration(video))
-    target_kbps = max(200, int((target_mb * 1024 * 1024 * 8 / duration) / 1000 * 0.92))
-    audio_kbps = 64
-    video_kbps = max(120, target_kbps - audio_kbps)
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="vmp-"))
-    out = tmp_dir / "compressed.mp4"
-    subprocess.run([
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-i", str(video),
-        "-vf", "scale='if(gt(iw,960),960,iw)':-2",
-        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-        "-b:v", f"{video_kbps}k", "-maxrate", f"{video_kbps}k", "-bufsize", f"{video_kbps * 2}k",
-        "-c:a", "aac", "-b:a", f"{audio_kbps}k",
-        "-movflags", "+faststart", str(out),
-    ], check=True)
+def tesseract_ocr(path: Path, requested_languages: str) -> dict[str, Any]:
+    if not shutil.which("tesseract"):
+        raise RuntimeError("Tesseract is unavailable")
+    languages = tesseract_languages(requested_languages)
+    result = subprocess.run(
+        ["tesseract", str(path), "stdout", "-l", languages, "tsv"],
+        check=True, capture_output=True, text=True, timeout=180,
+    )
+    rows = list(csv.DictReader(io.StringIO(result.stdout), delimiter="\t"))
+    width = height = 0
+    lines: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        if row.get("level") == "1":
+            width, height = int(row.get("width") or 0), int(row.get("height") or 0)
+        if row.get("level") != "5" or not (text := (row.get("text") or "").strip()):
+            continue
+        confidence = float(row.get("conf") or -1)
+        if confidence < 0:
+            continue
+        key = tuple(row.get(name, "") for name in ("page_num", "block_num", "par_num", "line_num"))
+        group = lines.setdefault(key, {"words": [], "scores": []})
+        group["words"].append(text)
+        group["scores"].append(confidence / 100.0)
+    items = [
+        {
+            "text": " ".join(group["words"]),
+            "confidence": sum(group["scores"]) / len(group["scores"]),
+        }
+        for group in lines.values()
+    ]
+    return {"backend": f"tesseract:{languages}", "width": width, "height": height, "items": items}
 
-    if file_size_mb(out) > target_mb:
-        tighter = max(100, int(video_kbps * 0.7))
-        out2 = tmp_dir / "compressed2.mp4"
-        subprocess.run([
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-i", str(video),
-            "-vf", "scale='if(gt(iw,854),854,iw)':-2",
-            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-            "-b:v", f"{tighter}k", "-maxrate", f"{tighter}k", "-bufsize", f"{tighter * 2}k",
-            "-c:a", "aac", "-b:a", "48k",
-            "-movflags", "+faststart", str(out2),
-        ], check=True)
-        out = out2
 
-    if file_size_mb(out) > target_mb:
-        raise RuntimeError(f"Compressed video is still too large ({file_size_mb(out):.0f}MB > {target_mb}MB)")
-    return out
+def prepare_local_image(path: Path, tmp_dir: Path, index: int) -> Path:
+    if path.suffix.lower() != ".svg":
+        return path
+    converted = tmp_dir / f"converted-{index}.png"
+    if shutil.which("magick"):
+        subprocess.run(["magick", str(path), str(converted)], check=True, capture_output=True)
+        return converted
+    if sys.platform == "darwin" and shutil.which("sips"):
+        subprocess.run(
+            ["sips", "-s", "format", "png", str(path), "--out", str(converted)],
+            check=True, capture_output=True,
+        )
+        return converted
+    raise RuntimeError("Local SVG OCR requires ImageMagick")
+
+
+def local_ocr(path: Path, backend: str, languages: str) -> tuple[dict[str, Any], list[str]]:
+    operations = []
+    if backend in ("auto", "system"):
+        if sys.platform == "darwin":
+            operations.append(("macos-vision", macos_ocr))
+        elif sys.platform == "win32":
+            operations.append(("windows-ocr", windows_ocr))
+    if backend in ("auto", "tesseract"):
+        operations.append(("tesseract", lambda image: tesseract_ocr(image, languages)))
+
+    errors = []
+    for name, operation in operations:
+        try:
+            return operation(path), errors
+        except Exception as exc:
+            errors.append(f"{name}: {safe_error(exc)}")
+    raise RuntimeError("No local OCR backend succeeded. " + "; ".join(errors))
+
+
+def local_result(path: Path, tmp_dir: Path, index: int, backend: str, languages: str) -> Result:
+    prepared = prepare_local_image(path, tmp_dir, index)
+    ocr, errors = local_ocr(prepared, backend, languages)
+    text = "\n".join(
+        item.get("text", "").strip()
+        for item in ocr.get("items", [])
+        if item.get("text", "").strip()
+    )
+    blocks = []
+    for item in ocr.get("items", []):
+        value = item.get("text", "").strip()
+        if not value:
+            continue
+        confidence = item.get("confidence")
+        prefix = f"{confidence:.0%} · " if isinstance(confidence, (int, float)) else ""
+        blocks.append(f"- {prefix}{value}")
+
+    report = "\n".join([
+        "# 图片本地 OCR",
+        "> 未使用云端多模态模型；这里只提供文字和基础信息。",
+        "",
+        f"- 尺寸：{ocr.get('width', 0)} × {ocr.get('height', 0)}",
+        f"- OCR：{ocr['backend']}",
+        *([f"- 降级：{'；'.join(errors)}"] if errors else []),
+        "",
+        "## 识别文字",
+        text or "未识别到文字",
+        "",
+        "## 文字块",
+        "\n".join(blocks) or "- 未识别到文字",
+    ])
+    attempts = [{"provider": "local", "status": "success", "detail": ocr["backend"]}]
+    return Result(report, f"local:{ocr['backend']}", "", attempts)
 
 
 # ---------------------------------------------------------------------------
-# Prompt / output helpers
+# Routing / parallel execution
 # ---------------------------------------------------------------------------
 
-def slugify(value: str, fallback: str = "media") -> str:
-    value = value.strip().lower()
-    value = re.sub(r"https?://", "", value)
-    value = re.sub(r"[^0-9a-z\u4e00-\u9fff._-]+", "-", value)
-    value = re.sub(r"-+", "-", value).strip("-._")
-    if not value:
-        value = fallback
-    return value[:80]
+def route_image(
+    path: Path,
+    index: int,
+    values: dict[str, str],
+    order: list[str],
+    task: str,
+    tmp_dir: Path,
+    ocr_backend: str,
+    ocr_languages: str,
+    base_url_override: str,
+    model_override: str,
+) -> Result:
+    attempts: list[dict[str, str]] = []
+    configured = 0
+    override_applied = False
+
+    for name in order:
+        provider = resolve_provider(name, values, allow_common=len(order) == 1)
+        if not provider.api_key:
+            attempts.append({"provider": name, "status": "skipped", "detail": "API key not configured"})
+            continue
+        configured += 1
+        if not override_applied:
+            provider.base_url = base_url_override.strip() or provider.base_url
+            provider.model = model_override.strip() or provider.model
+            override_applied = True
+        try:
+            print(f"[image {index}] {name} / {provider.model}", file=sys.stderr)
+            text = call_provider(provider, [path], task)
+            attempts.append({"provider": name, "status": "success", "detail": provider.model})
+            return Result(text, name, provider.model, attempts)
+        except Exception as exc:
+            detail = safe_error(exc)
+            attempts.append({"provider": name, "status": "failed", "detail": detail})
+            print(f"[image {index}] {name} failed: {detail}", file=sys.stderr)
+
+    reason = "no API key" if configured == 0 else "cloud providers failed"
+    print(f"[image {index}] local OCR ({reason})", file=sys.stderr)
+    fallback = local_result(path, tmp_dir, index, ocr_backend, ocr_languages)
+    fallback.attempts = [*attempts, *fallback.attempts]
+    return fallback
 
 
-def source_slug(raw_inputs: list[str], media_label: str, explicit_name: str) -> str:
-    if explicit_name:
-        return slugify(explicit_name, media_label)
+def route_together(
+    paths: list[Path],
+    values: dict[str, str],
+    order: list[str],
+    task: str,
+    tmp_dir: Path,
+    ocr_backend: str,
+    ocr_languages: str,
+    base_url_override: str,
+    model_override: str,
+    jobs: int,
+) -> Result:
+    attempts: list[dict[str, Any]] = []
+    configured = 0
+    override_applied = False
 
-    if len(raw_inputs) == 1:
-        raw = raw_inputs[0]
-        parsed = urlparse(raw)
-        if parsed.scheme in ("http", "https"):
-            host = parsed.netloc.replace("www.", "")
-            path_stem = Path(parsed.path).stem
-            query = parse_qs(parsed.query)
-            if host.endswith("youtube.com") and query.get("v"):
-                path_stem = query["v"][0]
-            elif host == "youtu.be" and Path(parsed.path).name:
-                path_stem = Path(parsed.path).name
-            if not path_stem or path_stem in {"watch", "index", "video", "embed"}:
-                path_stem = host
-            return slugify(f"{host}-{path_stem}", media_label)
-        return slugify(Path(raw).expanduser().stem, media_label)
+    for name in order:
+        provider = resolve_provider(name, values, allow_common=len(order) == 1)
+        if not provider.api_key:
+            attempts.append({"provider": name, "status": "skipped", "detail": "API key not configured"})
+            continue
+        configured += 1
+        if not override_applied:
+            provider.base_url = base_url_override.strip() or provider.base_url
+            provider.model = model_override.strip() or provider.model
+            override_applied = True
+        try:
+            print(f"[together] {name} / {provider.model} / {len(paths)} images", file=sys.stderr)
+            text = call_provider(provider, paths, task)
+            attempts.append({"provider": name, "status": "success", "detail": provider.model})
+            return Result(text, name, provider.model, attempts)
+        except Exception as exc:
+            detail = safe_error(exc)
+            attempts.append({"provider": name, "status": "failed", "detail": detail})
+            print(f"[together] {name} failed: {detail}", file=sys.stderr)
 
-    first = raw_inputs[0]
-    first_slug = source_slug([first], media_label, "")
-    return slugify(f"{first_slug}-plus-{len(raw_inputs) - 1}-more", media_label)
+    reason = "no API key" if configured == 0 else "cloud providers failed"
+    print(f"[together] local OCR ({reason})", file=sys.stderr)
+
+    def analyze(item: tuple[int, Path]) -> tuple[int, Result]:
+        index, path = item
+        return index, local_result(path, tmp_dir, index, ocr_backend, ocr_languages)
+
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        local_pairs = list(executor.map(analyze, enumerate(paths, start=1)))
+    local_results = [result for _, result in local_pairs]
+    for index, result in local_pairs:
+        for attempt in result.attempts:
+            attempts.append({"input": index, **attempt})
+    return Result(
+        combined_report(paths, local_results),
+        unique_join([result.backend for result in local_results]),
+        "",
+        attempts,
+    )
 
 
-def build_output_path(*, output_arg: str, media_label: str, raw_inputs: list[str], explicit_name: str) -> Path:
-    if output_arg:
-        return Path(output_arg).expanduser().resolve()
+def unique_join(values: list[str]) -> str:
+    return ",".join(dict.fromkeys(value for value in values if value))
 
+
+def strip_title(text: str) -> str:
+    return re.sub(r"^# (?:图片解析|图片本地 OCR)\s*", "", text.strip())
+
+
+def combined_report(paths: list[Path], results: list[Result]) -> str:
+    if len(results) == 1:
+        return results[0].text.strip()
+    sections = ["# 多图并行解析", f"> 已并行查看 {len(results)} 张图片。"]
+    for index, (path, result) in enumerate(zip(paths, results), start=1):
+        sections.extend(["", f"## 图片 {index}：{path.name}", strip_title(result.text)])
+    return "\n".join(sections).strip()
+
+
+# ---------------------------------------------------------------------------
+# Output / CLI
+# ---------------------------------------------------------------------------
+
+def slug(value: str) -> str:
+    value = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff._-]+", "-", value.strip()).strip("-._")
+    return (value or "images")[:80]
+
+
+def output_path(output: str, name: str, raw_inputs: list[str]) -> Path:
+    if output:
+        return Path(output).expanduser().resolve()
     root = Path(os.getenv("SEE_OUTPUT_DIR", str(DEFAULT_OUTPUT_ROOT))).expanduser()
-    day_dir = root / datetime.now().strftime("%Y-%m-%d")
-    day_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    slug = source_slug(raw_inputs, media_label, explicit_name)
-    return (day_dir / f"{ts}__{media_label}__{slug}.md").resolve()
+    day = root / datetime.now().strftime("%Y-%m-%d")
+    day.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    source = name or Path(urlparse(raw_inputs[0]).path).stem or "images"
+    suffix = f"-plus-{len(raw_inputs) - 1}" if len(raw_inputs) > 1 else ""
+    return (day / f"{timestamp}__image__{slug(source + suffix)}.md").resolve()
 
 
-def render_frontmatter(*, created_at: str, media_label: str, output_name: str, raw_inputs: list[str], model: str, task: str) -> str:
+def frontmatter(
+    raw_inputs: list[str],
+    output_name: str,
+    results: list[Result],
+    task: str,
+    jobs: int,
+    mode: str,
+) -> str:
+    attempts = []
+    for index, result in enumerate(results, start=1):
+        for attempt in result.attempts:
+            attempts.append({"input": attempt.get("input", "all" if mode == "together" else index), **attempt})
     lines = [
         "---",
-        f"created_at: {created_at}",
-        f"media_type: {media_label}",
+        f"created_at: {datetime.now(timezone.utc).isoformat()}",
         f"output_name: {output_name}",
-        f"model: {model}",
+        f"backend: {json.dumps(unique_join([item.backend for item in results]), ensure_ascii=False)}",
+        f"model: {json.dumps(unique_join([item.model for item in results]), ensure_ascii=False)}",
+        f"mode: {json.dumps(mode, ensure_ascii=False)}",
+        f"parallel_jobs: {jobs}",
         "source_inputs:",
+        *[f"  - {json.dumps(item, ensure_ascii=False)}" for item in raw_inputs],
+        f"task: {json.dumps(task.strip(), ensure_ascii=False)}",
+        "route_attempts:",
     ]
-    for item in raw_inputs:
-        safe = item.replace("\n", " ").strip()
-        lines.append(f"  - {json.dumps(safe, ensure_ascii=False)}")
-    lines.append(f"task_override: {json.dumps(task.strip(), ensure_ascii=False)}")
+    for attempt in attempts:
+        lines.extend([
+            f"  - input: {json.dumps(attempt['input'], ensure_ascii=False)}",
+            f"    provider: {json.dumps(attempt['provider'], ensure_ascii=False)}",
+            f"    status: {json.dumps(attempt['status'], ensure_ascii=False)}",
+            f"    detail: {json.dumps(attempt.get('detail', ''), ensure_ascii=False)}",
+        ])
     lines.append("---")
     return "\n".join(lines)
 
 
-def image_system_prompt() -> str:
-    return (
-        "你是一个视觉内容解析助手。你的任务是把图片稳定地转成可复用的中文笔记。"
-        "优先识别：1）整体画面内容；2）关键主体、元素和关系；3）图片中的文字；4）风格、场景、布局和可用于后续工作的细节。"
-        "请输出 Markdown，并严格使用以下结构："
-        "\n# 图片解析\n## 一句话概览\n## 画面内容\n## 关键信息点\n## 图片文字\n## 可复用细节"
-        "\n如果没有明显文字，请明确写“无明显文字”。"
-        "如果不确定，请用“可能”“看起来像”这类表述，不要编造。"
-    )
-
-
-def video_system_prompt() -> str:
-    return (
-        "你是一个视频解析助手。你的任务是把视频稳定地转成可复用的中文笔记。"
-        "优先级为：1）字幕和口播信息；2）画面中出现的关键内容；3）人物动作、操作步骤和片段脉络；4）最终可复用的信息。"
-        "请输出 Markdown，并严格使用以下结构："
-        "\n# 视频解析\n## 一句话总结\n## 字幕与口播重点\n## 画面与动作\n## 关键步骤 / 关键片段\n## 可复用信息"
-        "\n字幕或口播相关内容优先写全；画面内容用于补充和校正。"
-        "如果不确定，请明确说明，不要补不存在的细节。"
-    )
-
-
-def image_user_prompt(extra_task: str, count: int) -> str:
-    focus = extra_task.strip()
-    suffix = f"\n额外关注：{focus}" if focus else ""
-    multi = "这是一组图片，请注意它们之间的异同。" if count > 1 else ""
-    return f"请解析这{count}张图片。{multi}{suffix}".strip()
-
-
-def video_user_prompt(extra_task: str) -> str:
-    focus = extra_task.strip()
-    suffix = f"\n额外关注：{focus}" if focus else ""
-    return ("请重点提取视频里的字幕、口播、主要画面和关键动作，并整理成清晰笔记。" + suffix).strip()
-
-
-# ---------------------------------------------------------------------------
-# Analyze
-# ---------------------------------------------------------------------------
-
-def analyze_images(*, base_url: str, api_key: str, model: str, task: str, paths: List[Path]) -> str:
-    parts: list = [{"type": "text", "text": image_user_prompt(task, len(paths))}]
-    for path in paths:
-        parts.append({"type": "image_url", "image_url": {"url": encode_data_url(path)}})
-    return call_zenmux(
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        messages=[
-            {"role": "system", "content": image_system_prompt()},
-            {"role": "user", "content": parts},
-        ],
-    )
-
-
-def analyze_video(*, base_url: str, api_key: str, model: str, task: str, video: Path, max_mb: int) -> str:
-    upload = video
-    if file_size_mb(video) > max_mb:
-        print(f"Compressing video ({file_size_mb(video):.0f}MB > {max_mb}MB limit)...", file=sys.stderr)
-        upload = compress_video(video, max_mb)
-        print(f"Compressed to {file_size_mb(upload):.0f}MB", file=sys.stderr)
-    return call_zenmux(
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        messages=[
-            {"role": "system", "content": video_system_prompt()},
-            {"role": "user", "content": [
-                {"type": "text", "text": video_user_prompt(task)},
-                {"type": "file", "file": {"filename": upload.name, "file_data": encode_data_url(upload)}},
-            ]},
-        ],
-        timeout_sec=900,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Parse image/video via ZenMux.")
-    parser.add_argument("inputs", nargs="*", help="Local file paths or URLs (images/videos/webpages).")
-    parser.add_argument("--image", action="append", default=[], help="Image path or URL (repeatable).")
-    parser.add_argument("--video", default="", help="Video path or URL.")
-    parser.add_argument("--task", default="", help="Optional extra focus for the analysis.")
-    parser.add_argument("--name", default="", help="Optional short name for the output file.")
-    parser.add_argument("-o", "--output", default="", help="Output file path.")
-    parser.add_argument("--max-upload-mb", type=int, default=45, help="Max video upload size in MB.")
-    parser.add_argument("--base-url", default=os.getenv("ZENMUX_BASE_URL", DEFAULT_BASE_URL))
-    parser.add_argument("--model", default=os.getenv("ZENMUX_MODEL", DEFAULT_MODEL))
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="See images with multimodal APIs or local OCR.")
+    parser.add_argument("inputs", nargs="*", help="Image file paths or URLs.")
+    parser.add_argument("--image", action="append", default=[], help="Image path or URL; repeatable.")
+    parser.add_argument("--task", default="", help="Optional focus.")
+    parser.add_argument("--provider", choices=["auto", *PROVIDER_SPECS, "local"], default="auto")
+    parser.add_argument("--model", default="", help="Model override.")
+    parser.add_argument("--base-url", default="", help="Base URL override.")
+    parser.add_argument("--ocr-backend", choices=["auto", "system", "tesseract"], default=os.getenv("SEE_OCR_BACKEND", "auto"))
+    parser.add_argument("--ocr-languages", default=os.getenv("SEE_OCR_LANGUAGES", ""))
+    parser.add_argument("--jobs", type=int, default=int(os.getenv("SEE_JOBS", "4")), help="Parallel image jobs.")
+    parser.add_argument("--together", action="store_true", help="Analyze all images together in one multimodal request.")
+    parser.add_argument("--name", default="", help="Output name.")
+    parser.add_argument("-o", "--output", default="", help="Output Markdown path.")
     return parser.parse_args()
 
 
 def main() -> int:
     try:
         args = parse_args()
-        api_key = resolve_api_key()
-        if not api_key:
-            print("[ERROR] No ZENMUX_API_KEY found. Set it as env var, in .env.local, or in ~/.config/see/api_key", file=sys.stderr)
-            return 1
-
-        tmp_dir = Path(tempfile.mkdtemp(prefix="vmp-"))
-
-        raw_inputs = list(args.inputs)
-        raw_inputs.extend(args.image)
-        if args.video:
-            raw_inputs.append(args.video)
-
+        raw_inputs = [*args.inputs, *args.image]
         if not raw_inputs:
-            print("[ERROR] No input provided. Pass file paths or URLs.", file=sys.stderr)
-            return 1
+            raise RuntimeError("Pass at least one image path or URL")
+        if args.jobs <= 0:
+            raise RuntimeError("--jobs must be greater than 0")
 
-        images: List[Path] = []
-        video: Path | None = None
-        for raw in raw_inputs:
-            media_type, resolved = resolve_input(raw, tmp_dir)
-            if media_type == "image":
-                images.append(resolved)
+        values = config_values()
+        order = provider_order(args.provider, values)
+        jobs = min(args.jobs, len(raw_inputs))
+
+        with tempfile.TemporaryDirectory(prefix="see-") as tmp:
+            tmp_dir = Path(tmp)
+            paths = [resolve_image(raw, tmp_dir, index) for index, raw in enumerate(raw_inputs, start=1)]
+
+            if args.together and len(paths) > 1:
+                results = [
+                    route_together(
+                        paths=paths,
+                        values=values,
+                        order=order,
+                        task=args.task,
+                        tmp_dir=tmp_dir,
+                        ocr_backend=args.ocr_backend,
+                        ocr_languages=args.ocr_languages,
+                        base_url_override=args.base_url,
+                        model_override=args.model,
+                        jobs=jobs,
+                    )
+                ]
+                mode = "together"
+                report = results[0].text.strip()
             else:
-                if video is not None:
-                    print("[ERROR] Only one video at a time is supported.", file=sys.stderr)
-                    return 1
-                video = resolved
+                def analyze(item: tuple[int, Path]) -> Result:
+                    index, path = item
+                    return route_image(
+                        path=path,
+                        index=index,
+                        values=values,
+                        order=order,
+                        task=args.task,
+                        tmp_dir=tmp_dir,
+                        ocr_backend=args.ocr_backend,
+                        ocr_languages=args.ocr_languages,
+                        base_url_override=args.base_url,
+                        model_override=args.model,
+                    )
 
-        if images and video:
-            print("[ERROR] Cannot mix images and video in one call. Process them separately.", file=sys.stderr)
-            return 1
+                with ThreadPoolExecutor(max_workers=jobs) as executor:
+                    results = list(executor.map(analyze, enumerate(paths, start=1)))
+                mode = "parallel" if len(paths) > 1 else "single"
+                report = combined_report(paths, results)
 
-        media_label = "images" if len(images) > 1 else "image"
-        if video is not None:
-            media_label = "video"
-
-        out_path = build_output_path(
-            output_arg=args.output,
-            media_label=media_label,
-            raw_inputs=raw_inputs,
-            explicit_name=args.name,
-        )
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if images:
-            result = analyze_images(
-                base_url=args.base_url,
-                api_key=api_key,
-                model=args.model,
-                task=args.task,
-                paths=images,
+            destination = output_path(args.output, args.name, raw_inputs)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            content = (
+                frontmatter(raw_inputs, destination.name, results, args.task, jobs, mode)
+                + "\n\n"
+                + report
+                + "\n"
             )
-        else:
-            result = analyze_video(
-                base_url=args.base_url,
-                api_key=api_key,
-                model=args.model,
-                task=args.task,
-                video=video,
-                max_mb=args.max_upload_mb,
-            )
-
-        created_at = datetime.now(timezone.utc).isoformat()
-        frontmatter = render_frontmatter(
-            created_at=created_at,
-            media_label=media_label,
-            output_name=out_path.name,
-            raw_inputs=raw_inputs,
-            model=args.model,
-            task=args.task,
-        )
-        content = f"{frontmatter}\n\n{result.strip()}\n"
-        out_path.write_text(content, encoding="utf-8")
-        print(f"output_path={out_path}")
+            destination.write_text(content, encoding="utf-8")
+            print(f"output_path={destination}")
         return 0
-
     except Exception as exc:
-        print(f"[ERROR] {exc}", file=sys.stderr)
+        print(f"[ERROR] {safe_error(exc)}", file=sys.stderr)
         return 1
 
 

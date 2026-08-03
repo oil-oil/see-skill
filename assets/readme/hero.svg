@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="390" viewBox="0 0 1200 390"
+     role="img" aria-labelledby="title desc">
+  <title id="title">see — 为纯文本模型补充原生图片理解</title>
+  <desc id="desc">原图和用户问题经过 see 自动路由到 Qwen3.7 Plus，失败时降级到本地 OCR。</desc>
+
+  <rect width="1200" height="390" rx="28" fill="#06100E"/>
+  <path d="M0 306H1200" stroke="#17332B" stroke-width="2"/>
+
+  <g id="title-block" transform="translate(62 55)"
+     font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif">
+    <text x="0" y="22" fill="#5EE7B1" font-size="20" font-weight="700" letter-spacing="2">MULTIMODAL BRIDGE</text>
+    <text x="0" y="104" fill="#F4FBF7" font-size="82" font-weight="760">see</text>
+    <text x="0" y="154" fill="#D8E7E1" font-size="28" font-weight="600">给纯文本模型，一双真正会看图的眼睛</text>
+    <text x="0" y="198" fill="#8DA69B" font-size="21">原图直传 · 问题原样传入 · 云端失败自动降级</text>
+  </g>
+
+  <g id="routing-proof" transform="translate(690 44)"
+     font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif">
+    <rect x="0" y="0" width="442" height="235" rx="22" fill="#0B1B17" stroke="#21473B" stroke-width="2"/>
+
+    <g id="text-model" transform="translate(28 28)">
+      <rect width="126" height="58" rx="14" fill="#102722"/>
+      <text x="63" y="25" text-anchor="middle" fill="#8DA69B" font-size="18" font-weight="650">TEXT MODEL</text>
+      <text x="63" y="47" text-anchor="middle" fill="#F4FBF7" font-size="20" font-weight="750">DeepSeek</text>
+    </g>
+
+    <path d="M154 57H194" stroke="#5EE7B1" stroke-width="3"/>
+    <path d="M187 50L196 57L187 64" fill="none" stroke="#5EE7B1" stroke-width="3"/>
+
+    <g id="see-router" transform="translate(199 23)">
+      <circle cx="42" cy="34" r="34" fill="#5EE7B1"/>
+      <path d="M22 34C32 19 52 19 62 34C52 49 32 49 22 34Z" fill="none" stroke="#06100E" stroke-width="4"/>
+      <circle cx="42" cy="34" r="7" fill="#06100E"/>
+      <text x="42" y="91" text-anchor="middle" fill="#D8E7E1" font-size="20" font-weight="750">see</text>
+    </g>
+
+    <path d="M276 57H309V38H326" fill="none" stroke="#7AA7FF" stroke-width="3"/>
+    <path d="M276 57H309V132H326" fill="none" stroke="#5EE7B1" stroke-width="3"/>
+
+    <g id="vision-output" transform="translate(326 15)">
+      <rect width="88" height="50" rx="12" fill="#132642" stroke="#355D9E" stroke-width="2"/>
+      <text x="44" y="22" text-anchor="middle" fill="#AFC8FF" font-size="17" font-weight="700">QWEN</text>
+      <text x="44" y="41" text-anchor="middle" fill="#F4FBF7" font-size="17" font-weight="750">VISION</text>
+    </g>
+
+    <g id="ocr-output" transform="translate(326 107)">
+      <rect width="88" height="50" rx="12" fill="#123126" stroke="#2B6A51" stroke-width="2"/>
+      <text x="44" y="22" text-anchor="middle" fill="#94E8C4" font-size="17" font-weight="700">LOCAL</text>
+      <text x="44" y="41" text-anchor="middle" fill="#F4FBF7" font-size="17" font-weight="750">OCR</text>
+    </g>
+
+    <text x="28" y="206" fill="#8DA69B" font-size="18">同一个入口，自动选择可用的视觉路径</text>
+  </g>
+
+  <g id="metadata" transform="translate(62 337)"
+     font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+     font-size="18" font-weight="650">
+    <text x="0" y="0" fill="#5EE7B1">QWEN3.7 PLUS</text>
+    <text x="194" y="0" fill="#8DA69B">ZENMUX · 百炼 · OPENROUTER · TOKENDANCE</text>
+    <text x="800" y="0" fill="#7AA7FF">MACOS · WINDOWS · LINUX</text>
+  </g>
+</svg>

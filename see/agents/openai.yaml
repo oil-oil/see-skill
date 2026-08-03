@@ -1,0 +1,5 @@
+interface:
+  display_name: "See"
+  short_description: "让纯文本模型获得原生图片理解、多图比较与 OCR 降级能力"
+  brand_color: "#5EE7B1"
+  default_prompt: "使用 $see 查看这张图片并直接回答我的问题。"

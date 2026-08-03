@@ -1,93 +1,50 @@
 ---
 name: see
-description: >
-  Let AI see images and videos by converting visual media to text via ZenMux API.
-  Accepts local files OR URLs (image links, video links, webpages with embedded video).
-  Supported formats: .png/.jpg/.jpeg/.webp/.gif/.mp4/.mov/.mkv/.webm and any URL.
-  TRIGGER when: user asks to view/see/look at/describe/analyze/summarize any image or video,
-  user provides an image path or video path, user shares an image/video URL or a webpage URL
-  containing video (e.g. YouTube), user says "看看这个图/视频", "帮我看", "分析一下这个视频".
-  DO NOT TRIGGER when: user asks about text files, PDFs, or audio-only content.
+description: View and understand images with multimodal models. Use when the user asks to inspect, describe, compare, or extract text from one or more image files or URLs. Supports parallel analysis, multi-image comparison, and automatic local OCR fallback.
 ---
 
 # See
 
-Run `scripts/ask_media.sh` to analyze visual media. Never call ZenMux API directly.
-
-The script already contains built-in analysis prompts:
-- **Image**: focus on overall content, key elements, visible text, and reusable details
-- **Video**: focus on subtitles / spoken content first, then visuals, actions, and reusable takeaways
-
-Do not spend time rewriting prompts unless the user has a very specific extra focus. In most cases, just pass the file path or URL directly.
-
-## Usage
+只运行 `scripts/ask_media.sh`，不要自行调用模型 API。
 
 ```bash
-# Image
-scripts/ask_media.sh --image /path/to/image.png
+# 单图
+scripts/ask_media.sh image.png
 
-# Multiple images
-scripts/ask_media.sh --image /path/a.png --image /path/b.png
+# 多图并行
+scripts/ask_media.sh a.png b.png c.png
 
-# Video (auto-compresses if >45MB)
-scripts/ask_media.sh --video /path/to/video.mp4
+# 多图比较或联合判断
+scripts/ask_media.sh --together before.png after.png --task "比较界面变化"
 
-# URL (image, video, or webpage with embedded video)
-scripts/ask_media.sh "https://example.com/photo.jpg"
-scripts/ask_media.sh "https://youtube.com/watch?v=xxx"
-
-# Optional extra focus
-scripts/ask_media.sh --video demo.mp4 --task "重点看界面里的操作步骤"
-
-# Optional output name
-scripts/ask_media.sh --image photo.png --name landing-page-hero
-
-# Custom output path
-scripts/ask_media.sh --image photo.png -o /tmp/result.md
+# 可选关注点
+scripts/ask_media.sh screenshot.png --task "重点识别界面文字"
 ```
 
-On success, prints `output_path=<path>` to stdout. Read that file for the result.
+成功后读取 stdout 中 `output_path=<path>` 指向的 Markdown。
 
-## Options
+脚本自动完成：选择已配置的多模态供应商 → 失败时切换供应商 → 最后降级到本地 OCR。多图默认并行，结果按输入顺序汇总。
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--task` | Optional extra focus, not required for normal use | empty |
-| `--image` | Image path/URL (repeatable) | |
-| `--video` | Video path/URL | |
-| positional args | Any file path or URL | |
-| `--name` | Optional short output name | |
-| `-o` | Output file path | `~/.local/share/see/outputs/YYYY-MM-DD/<timestamp>__<type>__<source>.md` |
-| `--max-upload-mb` | Max size before compression | 45 |
-| `--model` | Model override | `google/gemini-3-flash-preview` |
+云端会把原图直接交给多模态模型，不预先 OCR、缩放或压缩。`--task` 会作为用户问题原样发送；没有特殊问题时不要添加。
 
-## Output
+首次使用先运行：
 
-By default, outputs are stored in a shared directory so Codex and Claude can both find them easily.
+```bash
+python3 scripts/onboard.py
+```
 
-Each output file includes:
-- A metadata header with creation time, media type, source inputs, model, and any extra focus
-- The parsed markdown result
+让用户在隐藏输入框中填写 Key，不要要求用户把 Key 发到对话里。重复运行可添加或更换供应商；用 `python3 scripts/onboard.py --status` 查看状态。
 
-Default naming pattern:
-- `YYYYMMDD-HHMMSS__image__<source>.md`
-- `YYYYMMDD-HHMMSS__images__<source>.md`
-- `YYYYMMDD-HHMMSS__video__<source>.md`
+供应商：`zenmux`、`bailian`、`openrouter`、`tokendance`、`local`。默认模型均为各平台的 Qwen3.7 Plus 对应 ID。需要覆盖时设置 `SEE_MODEL`；供应商地址用 `SEE_BASE_URL`。
 
-Use `--name` when you want a cleaner project-specific filename.
+也兼容厂商变量：`ZENMUX_API_KEY`、`DASHSCOPE_API_KEY`、`OPENROUTER_API_KEY`、`TOKENDANCE_API_KEY`。配置读取顺序为环境变量 → `.env.local` → 用户私有配置。
 
-## API Key
+Windows 私有配置位于 `%APPDATA%\see\config.env`；macOS/Linux 位于 `~/.config/see/config.env`。配置文件权限仅限当前用户，不得复制进 Skill 或项目仓库。
 
-Lookup order: `ZENMUX_API_KEY` env var → `.env.local` in cwd/parents → `~/.config/see/api_key`. If missing, ask user.
+本地降级：
 
-## Dependencies
+- macOS：Vision OCR → Tesseract
+- Windows：Windows OCR → Tesseract
+- Linux：Tesseract
 
-- **python3**: required
-- **ffmpeg/ffprobe**: required for video (`brew install ffmpeg`)
-- **yt-dlp**: optional, for webpage video extraction (`brew install yt-dlp`)
-
-## Workflow
-
-1. Run the script with file path, URL, or `--image`/`--video` flags.
-2. Only add `--task` if the user has a specific extra focus.
-3. Read the output file and continue working with the parsed text.
+可选参数只在需要时使用：`--together`、`--provider`、`--model`、`--task`、`--jobs`、`--ocr-backend`。本地 OCR 只提供文字和基础信息，不得当作完整画面理解。
