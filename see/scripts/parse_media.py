@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 DEFAULT_OUTPUT_ROOT = Path.home() / ".local" / "share" / "see" / "outputs"
 SCRIPT_DIR = Path(__file__).resolve().parent
 MACOS_OCR_SCRIPT = SCRIPT_DIR / "ocr_macos.swift"
+MACOS_OCR_JXA_SCRIPT = SCRIPT_DIR / "ocr_macos.js"
 WINDOWS_OCR_SCRIPT = SCRIPT_DIR / "ocr_windows.ps1"
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_INLINE_VIDEO_BYTES = 72 * 1024 * 1024
@@ -86,6 +88,9 @@ PROVIDER_SPECS = {
 }
 DEFAULT_PROVIDER_ORDER = ("zenmux", "bailian", "tokendance", "openrouter")
 DEFAULT_VIDEO_PROVIDER_ORDER = ("zenmux", "openrouter", "bailian", "tokendance")
+MACOS_OCR_BUILD_LOCK = threading.Lock()
+TESSERACT_LANGUAGE_LOCK = threading.Lock()
+TESSERACT_LANGUAGE_CACHE: str | None = None
 
 
 @dataclass
@@ -150,6 +155,25 @@ def setting(name: str, values: dict[str, str], default: str = "") -> str:
     return os.getenv(name, "").strip() or values.get(name, "").strip() or default
 
 
+def _configured_provider_order(
+    preferred: str,
+    configured: str,
+    default_order: tuple[str, ...],
+    error_label: str,
+) -> list[str]:
+    order = [
+        item.strip().lower()
+        for item in (configured.split(",") if configured else default_order)
+        if item.strip() and item.strip().lower() != "local"
+    ]
+    if preferred:
+        order = [preferred, *[item for item in order if item != preferred]]
+    unknown = [item for item in order if item not in PROVIDER_SPECS]
+    if unknown:
+        raise RuntimeError(f"Unknown {error_label}: {', '.join(unknown)}")
+    return order
+
+
 def provider_order(provider_arg: str, values: dict[str, str]) -> list[str]:
     if provider_arg == "local":
         return []
@@ -159,18 +183,12 @@ def provider_order(provider_arg: str, values: dict[str, str]) -> list[str]:
     preferred = setting("SEE_PROVIDER", values).lower()
     if preferred == "local":
         return []
-    configured = setting("SEE_PROVIDER_ORDER", values)
-    order = [
-        item.strip().lower()
-        for item in (configured.split(",") if configured else DEFAULT_PROVIDER_ORDER)
-        if item.strip() and item.strip().lower() != "local"
-    ]
-    if preferred:
-        order = [preferred, *[item for item in order if item != preferred]]
-    unknown = [item for item in order if item not in PROVIDER_SPECS]
-    if unknown:
-        raise RuntimeError(f"Unknown provider: {', '.join(unknown)}")
-    return order
+    return _configured_provider_order(
+        preferred,
+        setting("SEE_PROVIDER_ORDER", values),
+        DEFAULT_PROVIDER_ORDER,
+        "provider",
+    )
 
 
 def video_provider_order(provider_arg: str, values: dict[str, str]) -> list[str]:
@@ -180,18 +198,12 @@ def video_provider_order(provider_arg: str, values: dict[str, str]) -> list[str]
         return [provider_arg]
 
     preferred = setting("SEE_VIDEO_PROVIDER", values).lower()
-    configured = setting("SEE_VIDEO_PROVIDER_ORDER", values)
-    order = [
-        item.strip().lower()
-        for item in (configured.split(",") if configured else DEFAULT_VIDEO_PROVIDER_ORDER)
-        if item.strip() and item.strip().lower() != "local"
-    ]
-    if preferred:
-        order = [preferred, *[item for item in order if item != preferred]]
-    unknown = [item for item in order if item not in PROVIDER_SPECS]
-    if unknown:
-        raise RuntimeError(f"Unknown video provider: {', '.join(unknown)}")
-    return order
+    return _configured_provider_order(
+        preferred,
+        setting("SEE_VIDEO_PROVIDER_ORDER", values),
+        DEFAULT_VIDEO_PROVIDER_ORDER,
+        "video provider",
+    )
 
 
 def resolve_provider(
@@ -562,39 +574,61 @@ def run_json(command: list[str], timeout: int = 180) -> dict[str, Any]:
 
 
 def macos_ocr(path: Path) -> dict[str, Any]:
-    swift = shutil.which("swift")
-    if sys.platform != "darwin" or not swift:
+    if sys.platform != "darwin":
         raise RuntimeError("macOS Vision analysis is unavailable")
 
+    errors = []
+    swift = shutil.which("swift")
     swiftc = shutil.which("swiftc")
-    if swiftc:
+    if swift and swiftc:
         runtime_dir = SCRIPT_DIR.parent / ".runtime"
         binary = runtime_dir / "ocr_macos"
         try:
-            runtime_dir.mkdir(parents=True, exist_ok=True)
-            needs_build = (
-                not binary.exists()
-                or binary.stat().st_mtime_ns < MACOS_OCR_SCRIPT.stat().st_mtime_ns
-            )
-            if needs_build:
-                temporary = runtime_dir / f"ocr_macos.{os.getpid()}.tmp"
-                try:
-                    subprocess.run(
-                        [swiftc, "-O", str(MACOS_OCR_SCRIPT), "-o", str(temporary)],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=180,
-                    )
-                    temporary.chmod(0o755)
-                    os.replace(temporary, binary)
-                finally:
-                    temporary.unlink(missing_ok=True)
+            with MACOS_OCR_BUILD_LOCK:
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                needs_build = (
+                    not binary.exists()
+                    or binary.stat().st_mtime_ns < MACOS_OCR_SCRIPT.stat().st_mtime_ns
+                )
+                if needs_build:
+                    temporary = runtime_dir / f"ocr_macos.{os.getpid()}.tmp"
+                    try:
+                        subprocess.run(
+                            [swiftc, "-O", str(MACOS_OCR_SCRIPT), "-o", str(temporary)],
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                            timeout=180,
+                        )
+                        temporary.chmod(0o755)
+                        os.replace(temporary, binary)
+                    finally:
+                        temporary.unlink(missing_ok=True)
             return run_json([str(binary), str(path)])
-        except (OSError, subprocess.SubprocessError, RuntimeError):
-            pass
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            errors.append(f"swiftc: {safe_error(exc)}")
 
-    return run_json([swift, str(MACOS_OCR_SCRIPT), str(path)])
+    if swift:
+        try:
+            return run_json([swift, str(MACOS_OCR_SCRIPT), str(path)])
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            errors.append(f"swift: {safe_error(exc)}")
+
+    osascript = shutil.which("osascript")
+    if osascript and MACOS_OCR_JXA_SCRIPT.is_file():
+        try:
+            return run_json([
+                osascript,
+                "-l",
+                "JavaScript",
+                str(MACOS_OCR_JXA_SCRIPT),
+                str(path),
+            ])
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            errors.append(f"osascript: {safe_error(exc)}")
+
+    detail = "; ".join(errors) or "osascript and Swift are unavailable"
+    raise RuntimeError(f"macOS Vision analysis is unavailable. {detail}")
 
 
 def windows_ocr(path: Path) -> dict[str, Any]:
@@ -610,23 +644,33 @@ def windows_ocr(path: Path) -> dict[str, Any]:
     ])
 
 
+def installed_tesseract_languages() -> str:
+    global TESSERACT_LANGUAGE_CACHE
+    with TESSERACT_LANGUAGE_LOCK:
+        if TESSERACT_LANGUAGE_CACHE is not None:
+            return TESSERACT_LANGUAGE_CACHE
+        result = subprocess.run(
+            ["tesseract", "--list-langs"], check=True, capture_output=True, text=True, timeout=30
+        )
+        available = {
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip() and not line.lower().startswith("list of available")
+        }
+        preferred = [lang for lang in ("chi_sim", "chi_tra", "eng") if lang in available]
+        if preferred:
+            TESSERACT_LANGUAGE_CACHE = "+".join(preferred)
+        elif available:
+            TESSERACT_LANGUAGE_CACHE = sorted(available)[0]
+        else:
+            raise RuntimeError("Tesseract has no language data")
+        return TESSERACT_LANGUAGE_CACHE
+
+
 def tesseract_languages(requested: str) -> str:
     if requested.strip():
         return requested.strip().replace(",", "+")
-    result = subprocess.run(
-        ["tesseract", "--list-langs"], check=True, capture_output=True, text=True, timeout=30
-    )
-    available = {
-        line.strip()
-        for line in result.stdout.splitlines()
-        if line.strip() and not line.lower().startswith("list of available")
-    }
-    preferred = [lang for lang in ("chi_sim", "chi_tra", "eng") if lang in available]
-    if preferred:
-        return "+".join(preferred)
-    if available:
-        return sorted(available)[0]
-    raise RuntimeError("Tesseract has no language data")
+    return installed_tesseract_languages()
 
 
 def tesseract_ocr(path: Path, requested_languages: str) -> dict[str, Any]:
@@ -694,7 +738,23 @@ def local_ocr(path: Path, backend: str, languages: str) -> tuple[dict[str, Any],
             return operation(path), errors
         except Exception as exc:
             errors.append(f"{name}: {safe_error(exc)}")
-    raise RuntimeError("No local vision backend succeeded. " + "; ".join(errors))
+    raise RuntimeError(
+        "No local vision backend succeeded. "
+        + "; ".join(errors)
+        + " "
+        + local_setup_hint()
+    )
+
+
+def local_setup_hint() -> str:
+    if sys.platform == "darwin":
+        return "请使用 macOS 10.15 或更高版本；系统自带的 osascript 与 Vision 无需安装 Xcode。"
+    if sys.platform == "win32":
+        return (
+            "请在 Windows 设置 → 时间和语言 → 语言和区域 → 语言选项中安装 OCR，"
+            "或安装 Tesseract 并加入 PATH。"
+        )
+    return "请安装 Tesseract，例如 Ubuntu/Debian：sudo apt install tesseract-ocr tesseract-ocr-chi-sim。"
 
 
 def local_result(path: Path, tmp_dir: Path, index: int, backend: str, languages: str) -> Result:
@@ -957,7 +1017,7 @@ def unique_join(values: list[str]) -> str:
 
 
 def strip_title(text: str) -> str:
-    return re.sub(r"^# (?:图片解析|图片本地 OCR|图片本地分析|视频解析)\s*", "", text.strip())
+    return re.sub(r"^# (?:图片解析|图片本地分析|视频解析)\s*", "", text.strip())
 
 
 def combined_report(paths: list[Path], results: list[Result]) -> str:

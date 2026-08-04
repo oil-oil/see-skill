@@ -17,6 +17,8 @@ from parse_media import (
     Provider,
     call_provider,
     config_file_path,
+    local_ocr,
+    local_setup_hint,
     read_env_file,
     safe_error,
 )
@@ -59,7 +61,12 @@ def config_status() -> int:
             configured.append(provider)
     print(f"已保存 Key：{', '.join(configured) if configured else '无'}")
     print("视频默认：Gemini 3.1 Flash-Lite；平台不可用时 Qwen3.7 Plus")
-    print("本地图片分析：可直接使用")
+    try:
+        backend = verify_local()
+        print(f"本地图片分析：可用（{backend}）")
+    except Exception as exc:
+        print(f"本地图片分析：不可用（{safe_error(exc)}）")
+        print(f"修复方式：{local_setup_hint()}")
     return 0
 
 
@@ -85,6 +92,14 @@ def verify_provider(provider: Provider) -> None:
         image = Path(tmp) / "check.png"
         test_image(image)
         call_provider(provider, [image], "这是一张测试图片。只回答：配置成功。", retries=1)
+
+
+def verify_local() -> str:
+    with tempfile.TemporaryDirectory(prefix="see-onboard-local-") as tmp:
+        image = Path(tmp) / "check.png"
+        test_image(image)
+        result, _ = local_ocr(image, "auto", "")
+        return result["backend"]
 
 
 def clean_value(value: str, label: str) -> str:
@@ -152,10 +167,16 @@ def main() -> int:
     values = read_env_file(config_file_path())
 
     if provider_name == "local":
+        print("正在检查本地图片分析 ...")
+        try:
+            backend = verify_local()
+        except Exception as exc:
+            fail(f"本地图片分析不可用：{safe_error(exc)}\n修复方式：{local_setup_hint()}")
         values["SEE_PROVIDER"] = "local"
         path = write_config(values)
         print(f"配置完成：{path}")
-        print("当前使用本地图片分析，不需要 API Key；视频需要云端 Key。")
+        print(f"当前使用本地图片分析（{backend}），不需要 API Key；视频需要云端 Key。")
+        print("右下角仍显示当前主模型是正常的；see 不会替换主模型。")
         return 0
 
     spec = PROVIDER_SPECS[provider_name]
@@ -195,6 +216,7 @@ def main() -> int:
     path = write_config(values)
     print(f"配置完成：{path}")
     print(f"已保存：{provider_name} / {model}。图片和视频可共用此 Key，Key 不会写入 Skill。")
+    print("右下角仍显示当前主模型是正常的；see 只在需要时调用视觉模型。")
     return 0
 
 

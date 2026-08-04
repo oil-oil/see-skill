@@ -22,6 +22,8 @@ Codex 会启动 onboard。选择供应商后，在隐藏输入框中填写 API K
 
 没有多模态 Key 也能使用，onboard 时选择 `local` 即可。
 
+安装 Skill 不会更换右下角的主模型。继续显示 DeepSeek 等文本模型是正常的，`see` 只在查看媒体时调用视觉后端。
+
 ## 直接使用
 
 像平常一样告诉 AI 图片在哪里、想看什么：
@@ -44,6 +46,12 @@ Codex 会启动 onboard。选择供应商后，在隐藏输入框中填写 API K
 
 ```text
 总结 /path/to/demo.mp4 的内容
+```
+
+如果当前模型不支持图片，不要直接拖拽或粘贴图片附件。附件可能在 Skill 启动前就被模型接口拒绝；请先把图片保存到本地，再发送文件路径或 URL：
+
+```text
+使用 see 查看 /Users/me/Desktop/error.png
 ```
 
 AI 只需要调用一个脚本：
@@ -132,14 +140,26 @@ export ZENMUX_API_KEY=你的Key
 ## 本地降级
 
 ```text
-macOS   → Vision 图像分析 + OCR → Tesseract
+macOS   → 系统 Vision OCR → Tesseract
 Windows → Windows OCR  → Tesseract
 Linux   → Tesseract
 ```
 
-macOS Vision 和 Windows OCR 使用系统内置能力，不需要额外 Key。Tesseract 是最后兜底，需要用户自行安装。
+macOS Vision 通过系统自带的 `osascript` 调用，不需要 Xcode、Swift 或额外 Key；如果设备已经有 Swift，会自动启用增强分析。Windows OCR 也是系统能力，但需要安装 OCR 语言。Tesseract 是最后兜底，需要用户自行安装。
 
-macOS 还会返回场景分类、人物/人脸、条码和基础图形结构；这些线索仍不能替代多模态模型的完整语义理解。Windows 和 Linux 目前以 OCR 为主。
+macOS 的 Swift 增强路径还会返回场景分类、人物/人脸、条码和基础图形结构；这些线索仍不能替代多模态模型的完整语义理解。其他本地路径目前以 OCR 为主。
+
+检查本地后端：
+
+```bash
+python3 see/scripts/onboard.py --status
+```
+
+如果显示不可用：
+
+- macOS：升级到 macOS 10.15 或更高版本。
+- Windows：设置 → 时间和语言 → 语言和区域 → 语言选项，安装 OCR。
+- Ubuntu / Debian：`sudo apt install tesseract-ocr tesseract-ocr-chi-sim`。
 
 ## 参数
 
@@ -184,6 +204,7 @@ see/
     ├── see.sh
     ├── onboard.py
     ├── parse_media.py
+    ├── ocr_macos.js
     ├── ocr_macos.swift
     └── ocr_windows.ps1
 ```

@@ -1,5 +1,5 @@
 interface:
   display_name: "See"
-  short_description: "让纯文本模型获得原生图片、视频理解与自动路由降级能力"
+  short_description: "让纯文本模型通过一个入口理解图片和视频"
   brand_color: "#5EE7B1"
-  default_prompt: "使用 $see 查看这个图片或视频，并直接回答我的问题。"
+  default_prompt: "使用 $see 查看我提供的图片或视频文件路径，并直接回答问题。"

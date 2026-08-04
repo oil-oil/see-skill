@@ -1,11 +1,13 @@
 ---
 name: see
-description: View and understand images or videos with multimodal models. Use when the user asks to inspect, describe, compare, summarize, or extract text from image/video files or URLs. Supports native video understanding, parallel analysis, multi-image comparison, and automatic local image fallback.
+description: View and understand image or video files and URLs with multimodal models. Use when the user asks to inspect, describe, compare, summarize, or extract text from visual media, especially when the current text-only model says it does not support images. Supports native video understanding, parallel analysis, multi-image comparison, and automatic local image fallback.
 ---
 
 # See
 
 只运行 `scripts/see.sh`，不要自行调用模型 API。
+
+安装 Skill 不会更换当前主模型；右下角继续显示 DeepSeek 等文本模型是正常的。若拖拽或粘贴图片被主模型直接拒绝，说明附件在 Skill 启动前已被拦截。让用户提供图片的本地文件路径或 URL，再运行脚本，不要反复尝试直接读取附件。
 
 ```bash
 # 单图
@@ -46,9 +48,11 @@ Windows 私有配置位于 `%APPDATA%\see\config.env`；macOS/Linux 位于 `~/.c
 
 本地降级：
 
-- macOS：Vision 场景/人物/人脸/条码/图形结构 + OCR → Tesseract
+- macOS：系统 Vision OCR；有 Swift 时增加场景/人物/人脸/条码/图形结构 → Tesseract
 - Windows：Windows OCR → Tesseract
 - Linux：Tesseract
+
+本地后端报错时先运行 `python3 scripts/onboard.py --status`。macOS 10.15+ 不需要 Xcode；Windows 需要安装系统 OCR 语言；Linux 需要安装 Tesseract。
 
 可选参数只在需要时使用：`--together`、`--provider`、`--model`、`--task`、`--jobs`、`--ocr-backend`。本地视觉结果不等同于多模态模型的完整语义理解。
 
