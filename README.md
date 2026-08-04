@@ -50,16 +50,16 @@ AI 只需要调用一个脚本：
 
 ```bash
 # 单图
-see/scripts/ask_media.sh screenshot.png
+see/scripts/see.sh screenshot.png
 
 # 多图独立分析，默认并行
-see/scripts/ask_media.sh a.png b.png c.png
+see/scripts/see.sh a.png b.png c.png
 
 # 多图联合理解
-see/scripts/ask_media.sh --together before.png after.png --task "比较界面变化"
+see/scripts/see.sh --together before.png after.png --task "比较界面变化"
 
 # 完整视频理解
-see/scripts/ask_media.sh demo.mp4
+see/scripts/see.sh demo.mp4
 ```
 
 ## 为什么更接近原生视觉
@@ -181,7 +181,7 @@ see/
 ├── agents/
 │   └── openai.yaml
 └── scripts/
-    ├── ask_media.sh
+    ├── see.sh
     ├── onboard.py
     ├── parse_media.py
     ├── ocr_macos.swift

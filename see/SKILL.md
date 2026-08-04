@@ -5,23 +5,23 @@ description: View and understand images or videos with multimodal models. Use wh
 
 # See
 
-只运行 `scripts/ask_media.sh`，不要自行调用模型 API。
+只运行 `scripts/see.sh`，不要自行调用模型 API。
 
 ```bash
 # 单图
-scripts/ask_media.sh image.png
+scripts/see.sh image.png
 
 # 视频
-scripts/ask_media.sh video.mp4
+scripts/see.sh video.mp4
 
 # 多图并行
-scripts/ask_media.sh a.png b.png c.png
+scripts/see.sh a.png b.png c.png
 
 # 多图比较或联合判断
-scripts/ask_media.sh --together before.png after.png --task "比较界面变化"
+scripts/see.sh --together before.png after.png --task "比较界面变化"
 
 # 可选关注点
-scripts/ask_media.sh screenshot.png --task "重点识别界面文字"
+scripts/see.sh screenshot.png --task "重点识别界面文字"
 ```
 
 成功后读取 stdout 中 `output_path=<path>` 指向的 Markdown。
