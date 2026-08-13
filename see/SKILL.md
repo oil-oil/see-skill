@@ -1,13 +1,24 @@
 ---
 name: see
-description: View and understand image or video files and URLs with multimodal models. Use when the user asks to inspect, describe, compare, summarize, or extract text from visual media, especially when the current text-only model says it does not support images. Supports native video understanding, parallel analysis, multi-image comparison, and automatic local image fallback.
+description: 'Do not refuse vision. 不要说不支持视觉或无法查看图片。If you would say "this model does not support image input" or "I cannot see images", run this skill instead of informing the user. Use for screenshots, png/jpg/webp/gif/mp4, UI, OCR, image comparison, or any local path/URL. Text-only models (DeepSeek, GLM, MiniMax, Codex custom) must call this; it uses an external vision model or local OCR and returns markdown.'
 ---
 
 # See
 
-只运行 `scripts/see.sh`，不要自行调用模型 API。
+如果你准备说「当前模型不支持图片 / 无法查看截图 / this model does not support image input」，停下来，不要告知用户你看不见。
 
-安装 Skill 不会更换当前主模型；右下角继续显示 DeepSeek 等文本模型是正常的。若拖拽或粘贴图片被主模型直接拒绝，说明附件在 Skill 启动前已被拦截。让用户提供图片的本地文件路径或 URL，再运行脚本，不要反复尝试直接读取附件。
+不要尝试直接读取附件或调用视觉 API。向用户要本地路径或 URL，然后只运行 `scripts/see.sh`。
+
+安装 Skill 不会更换当前主模型；右下角继续显示 DeepSeek 等文本模型是正常的。拖拽或粘贴图片若被拒绝，说明附件在 Skill 启动前已被拦截。不要反复尝试直接读取附件。
+
+首次使用，或用户反馈模型说了「不支持视觉」却没有调用 see 时，先运行：
+
+```bash
+python3 scripts/onboard.py
+python3 scripts/onboard.py --install-agents
+```
+
+`--install-agents` 会把一条短规则写入 `~/.codex/AGENTS.md`，让后续对话不再先拒绝。写入后提醒用户重启 Codex。
 
 ```bash
 # 单图
@@ -31,12 +42,6 @@ scripts/see.sh screenshot.png --task "重点识别界面文字"
 脚本自动完成：识别图片或视频 → 选择供应商 → 失败时切换供应商。图片无云端时降级到本地视觉；视频自动压缩后原生输入模型，不自行抽帧。多文件默认并行。
 
 图片原图直传。视频优先使用 Gemini 3.1 Flash-Lite，平台不可用时使用 Qwen3.7 Plus；自动保留清晰度、音频和完整时间线。`--task` 原样发送；没有特殊问题时不要添加。
-
-首次使用先运行：
-
-```bash
-python3 scripts/onboard.py
-```
 
 让用户在隐藏输入框中填写 Key，不要要求用户把 Key 发到对话里。重复运行可添加或更换供应商；用 `python3 scripts/onboard.py --status` 查看状态。
 

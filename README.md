@@ -4,6 +4,22 @@
 
 `see` 让任何不支持多模态的模型直接查看图片和视频。图片默认交给 Qwen3.7 Plus；视频优先交给 Gemini 3.1 Flash-Lite，平台不可用时使用 Qwen3.7 Plus。
 
+## 不要拖图
+
+当前主模型如果不支持视觉，把图片拖进 Codex 或粘贴附件，会在 Skill 启动前被接口拒绝。模型会说「不支持视觉识别」，然后停住，`$see` 不会被调用。
+
+把图片保存到本地，发送路径或 URL，或显式输入 `$see`：
+
+```text
+使用 see 查看 /Users/me/Desktop/error.png
+```
+
+```text
+$see
+```
+
+配置时 onboard 会把一条短规则写入 `~/.codex/AGENTS.md`，让 Codex 每轮先看到：不要因为模型没有视觉就拒绝，去调用 `$see`。写入后重启 Codex。
+
 ## 安装
 
 把下面这句话发给 Codex：
@@ -21,6 +37,12 @@
 Codex 会启动 onboard。选择供应商后，在隐藏输入框中填写 API Key；Key 不需要发到聊天里，也不会写进 Skill 或项目仓库。
 
 没有多模态 Key 也能使用，onboard 时选择 `local` 即可。
+
+只补 Codex 拒绝覆盖、不改供应商时：
+
+```bash
+python3 see/scripts/onboard.py --install-agents
+```
 
 安装 Skill 不会更换右下角的主模型。继续显示 DeepSeek 等文本模型是正常的，`see` 只在查看媒体时调用视觉后端。
 
@@ -46,12 +68,6 @@ Codex 会启动 onboard。选择供应商后，在隐藏输入框中填写 API K
 
 ```text
 总结 /path/to/demo.mp4 的内容
-```
-
-如果当前模型不支持图片，不要直接拖拽或粘贴图片附件。附件可能在 Skill 启动前就被模型接口拒绝；请先把图片保存到本地，再发送文件路径或 URL：
-
-```text
-使用 see 查看 /Users/me/Desktop/error.png
 ```
 
 AI 只需要调用一个脚本：
@@ -118,6 +134,7 @@ Onboard 可重复运行，用于添加供应商、更换默认路由或切换成
 
 ```bash
 python3 see/scripts/onboard.py
+python3 see/scripts/onboard.py --install-agents
 python3 see/scripts/onboard.py --status
 ```
 

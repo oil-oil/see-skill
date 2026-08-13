@@ -1,5 +1,5 @@
 interface:
   display_name: "See"
-  short_description: "让纯文本模型通过一个入口理解图片和视频"
+  short_description: "纯文本模型看图看视频：不要拒绝，调用 $see"
   brand_color: "#5EE7B1"
-  default_prompt: "使用 $see 查看我提供的图片或视频文件路径，并直接回答问题。"
+  default_prompt: "不要说当前模型不支持视觉。使用 $see 查看我提供的本地图片/视频路径或 URL，然后直接回答问题。如果我只贴了图、没有路径，先让我保存成文件再继续。"

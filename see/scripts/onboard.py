@@ -4,12 +4,23 @@
 import argparse
 import getpass
 import os
+import re
 import struct
 import subprocess
 import sys
 import tempfile
 import zlib
 from pathlib import Path
+
+SEE_AGENTS_START = "<!-- see-skill:start -->"
+SEE_AGENTS_END = "<!-- see-skill:end -->"
+SEE_AGENTS_RULE = """<!-- see-skill:start -->
+If the user sends an image, screenshot, video, path, or URL — or you would say "this model does not support image input" / 不支持视觉 — do not refuse. Invoke `$see` and run `scripts/see.sh`. If an attachment was rejected, ask for a local path or URL, then run `$see`.
+<!-- see-skill:end -->"""
+SEE_AGENTS_PATTERN = re.compile(
+    re.escape(SEE_AGENTS_START) + r".*?" + re.escape(SEE_AGENTS_END),
+    re.DOTALL,
+)
 
 from parse_media import (
     DEFAULT_PROVIDER_ORDER,
@@ -27,6 +38,49 @@ from parse_media import (
 def fail(message: str) -> None:
     print(f"[ERROR] {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def user_agents_path() -> Path:
+    return Path.home() / ".codex" / "AGENTS.md"
+
+
+def agents_rule_installed(text: str) -> bool:
+    return bool(SEE_AGENTS_PATTERN.search(text))
+
+
+def upsert_agents_rule(text: str) -> str:
+    rule = SEE_AGENTS_RULE.strip()
+    if SEE_AGENTS_PATTERN.search(text):
+        return SEE_AGENTS_PATTERN.sub(rule, text)
+    stripped = text.rstrip()
+    if not stripped:
+        return rule + "\n"
+    return stripped + "\n\n" + rule + "\n"
+
+
+def write_text_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def install_agents_rule(path: Path | None = None) -> tuple[Path, bool]:
+    path = path or user_agents_path()
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    updated = upsert_agents_rule(existing)
+    changed = updated != existing
+    if changed:
+        write_text_atomic(path, updated)
+    return path, changed
+
+
+def print_trigger_hint() -> None:
+    print("下一步：不要拖图或粘贴图片。发本地路径或 URL，例如：")
+    print("  使用 see 查看 /path/to/screenshot.png")
+    print("或显式输入 $see。如果模型说不支持视觉却没有运行 see.sh，执行：")
+    print("  python3 scripts/onboard.py --install-agents")
+    print("然后重启 Codex。")
 
 
 def choose_provider() -> str:
@@ -61,6 +115,10 @@ def config_status() -> int:
             configured.append(provider)
     print(f"已保存 Key：{', '.join(configured) if configured else '无'}")
     print("视频默认：Gemini 3.1 Flash-Lite；平台不可用时 Qwen3.7 Plus")
+    agents_path = user_agents_path()
+    agents_text = agents_path.read_text(encoding="utf-8") if agents_path.exists() else ""
+    print(f"Codex 用户指令：{agents_path}")
+    print(f"看图拒绝覆盖：{'已写入' if agents_rule_installed(agents_text) else '未写入（运行 --install-agents）'}")
     try:
         backend = verify_local()
         print(f"本地图片分析：可用（{backend}）")
@@ -153,14 +211,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default="", help="可选供应商地址覆盖。")
     parser.add_argument("--no-default", action="store_true", help="保存供应商但不设为默认。")
     parser.add_argument("--skip-check", action="store_true", help="保存前不验证 API。")
+    parser.add_argument("--skip-agents", action="store_true", help="不写入 ~/.codex/AGENTS.md 拒绝覆盖规则。")
+    parser.add_argument("--install-agents", action="store_true", help="只写入 Codex 用户指令，不改供应商配置。")
     parser.add_argument("--status", action="store_true", help="只显示配置状态，不显示 Key。")
     return parser.parse_args()
+
+
+def maybe_install_agents(args: argparse.Namespace, interactive: bool) -> None:
+    if args.skip_agents:
+        return
+    if interactive and not confirm("写入 Codex 用户指令，避免模型因不支持视觉而拒绝看图？"):
+        print("已跳过 AGENTS.md。之后可运行：python3 scripts/onboard.py --install-agents")
+        return
+    path, changed = install_agents_rule()
+    if changed:
+        print(f"已写入看图拒绝覆盖：{path}")
+        print("重启 Codex 后生效。")
+    else:
+        print(f"看图拒绝覆盖已存在：{path}")
 
 
 def main() -> int:
     args = parse_args()
     if args.status:
         return config_status()
+    if args.install_agents:
+        path, changed = install_agents_rule()
+        print(f"{'已写入' if changed else '已存在'}看图拒绝覆盖：{path}")
+        if changed:
+            print("重启 Codex 后生效。")
+        print_trigger_hint()
+        return 0
 
     interactive = args.provider is None
     provider_name = args.provider or choose_provider()
@@ -177,6 +258,8 @@ def main() -> int:
         print(f"配置完成：{path}")
         print(f"当前使用本地图片分析（{backend}），不需要 API Key；视频需要云端 Key。")
         print("右下角仍显示当前主模型是正常的；see 不会替换主模型。")
+        maybe_install_agents(args, interactive)
+        print_trigger_hint()
         return 0
 
     spec = PROVIDER_SPECS[provider_name]
@@ -217,6 +300,8 @@ def main() -> int:
     print(f"配置完成：{path}")
     print(f"已保存：{provider_name} / {model}。图片和视频可共用此 Key，Key 不会写入 Skill。")
     print("右下角仍显示当前主模型是正常的；see 只在需要时调用视觉模型。")
+    maybe_install_agents(args, interactive)
+    print_trigger_hint()
     return 0
 
 
