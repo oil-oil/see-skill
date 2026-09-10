@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "profiles": {
+    "default": [
+      {
+        "manifest": "default.json",
+        "env": "ZENMUX_API_KEY"
+      }
+    ],
+    "bailian": [
+      {
+        "manifest": "bailian.json",
+        "env": "DASHSCOPE_API_KEY"
+      }
+    ],
+    "openrouter": [
+      {
+        "manifest": "openrouter.json",
+        "env": "OPENROUTER_API_KEY"
+      }
+    ],
+    "tokendance": [
+      {
+        "manifest": "tokendance.json",
+        "env": "TOKENDANCE_API_KEY"
+      }
+    ]
+  }
+}

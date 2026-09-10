@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "see",
+  "label": "媒体分析 API Key",
+  "credential": "see/zenmux/default",
+  "ui": {
+    "title": "配置服务",
+    "placeholder": "粘贴该服务的 API Key",
+    "saveLabel": "保存"
+  }
+}

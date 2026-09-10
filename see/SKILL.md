@@ -9,7 +9,7 @@ description: "使用外部视觉服务或本地 OCR 分析本地图片、截图�
 
 将当前 Skill 目录解析为绝对路径后调用 `scripts/see.sh`。外部服务或 OCR 均不可用时如实说明，不隐瞒限制，不把 OCR 文字结果称为完整视觉理解。
 
-安装 Skill 不会更换当前主模型；右下角继续显示 DeepSeek 等文本模型是正常的。拖拽或粘贴图片若被拒绝，说明附件在 Skill 启动前已被拦截。不要反复尝试直接读取附件。
+安装 Skill 不会更换当前主模型；界面继续显示原来的文本模型是正常的。拖拽或粘贴图片若被拒绝，说明附件在 Skill 启动前已被拦截。不要反复尝试直接读取附件。
 
 首次使用，或用户反馈模型说了「不支持视觉」却没有调用 see 时，先运行：
 
@@ -40,9 +40,9 @@ scripts/see.sh screenshot.png --task "重点识别界面文字"
 
 脚本自动完成：识别图片或视频 → 选择供应商 → 失败时切换供应商。图片无云端时降级到本地视觉；视频自动压缩后原生输入模型，不自行抽帧。多文件默认并行。
 
-图片原图直传。视频优先使用 Gemini 3.1 Flash-Lite，平台不可用时使用 Qwen3.7 Plus；自动保留清晰度、音频和完整时间线。`--task` 原样发送；没有特殊问题时不要添加。
+图片原图直传。视频按所选服务的模型配置处理；自动保留清晰度、音频和完整时间线。`--task` 原样发送；没有特殊问题时不要添加。
 
-让用户在隐藏输入框中填写 Key，不要要求用户把 Key 发到对话里。重复运行可添加或更换供应商；用 `python3 scripts/onboard.py --status` 查看状态。
+新配置按上述 API Key 配置说明打开本机页面，由用户亲自保存；选择的配置名、业务 `--provider` 必须对应。通过 run 包装云端分析命令，不能绕过包装器读取页面凭据。原 onboard 只用于兼容配置、状态或用户明确选择的终端方式。
 
 供应商：`zenmux`、`bailian`、`openrouter`、`tokendance`、`local`。图片默认 Qwen3.7 Plus；视频在 ZenMux/OpenRouter 默认 Gemini 3.1 Flash-Lite，其余平台默认 Qwen3.7 Plus。覆盖视频模型用 `SEE_VIDEO_MODEL`。
 
@@ -62,6 +62,10 @@ Windows 私有配置位于 `%APPDATA%\see\config.env`；macOS/Linux 位于 `~/.c
 
 视频需要任一云端 Key；同一个 Key 同时用于图片和视频。主 Agent 只传路径并读取 `output_path`，不要自行调用 ffmpeg、抽帧或上传。
 
+## API Key 配置入口
+
+需要外部服务凭据时先读[API Key 配置与业务读取](references/api-key-setup.md)：复用已有安全入口；本机缺少 Key 时使用随附固定页面，保存后通过业务包装入口读取。内置能力与纯本地流程不要求配置 Key。
+
 ## 凭据与数据边界
 
-云端分析会把选定媒体发给所选供应商，可能计费；本地 OCR 不等于完整视觉理解。新密钥通过终端隐藏输入存入系统凭据库，普通配置只保存引用。先用任务 Python 环境安装 `see/scripts/requirements-credentials.txt`（Skill 内相对路径为 `scripts/requirements-credentials.txt`）。不把 Key 发到聊天、命令参数或日志。旧明文配置不会自动迁移或覆盖：入口会先停止，提示备份后重新配置。状态检查只确认来源，API 验证成功才代表可用。全局指令写入仅在明确调用 `--install-agents` 时发生。
+云端分析会把选定媒体发给所选供应商，可能计费；本地 OCR 不等于完整视觉理解。新密钥通过固定本机页面存入系统凭据库，普通配置只保存引用。先用任务 Python 环境安装 `see/scripts/requirements-credentials.txt`（Skill 内相对路径为 `scripts/requirements-credentials.txt`）。不把 Key 发到聊天、命令参数或日志。旧明文配置不会自动迁移或覆盖：入口会先停止，提示备份后重新配置。状态检查只确认来源，API 验证成功才代表可用。全局指令写入仅在明确调用 `--install-agents` 时发生。

@@ -2,11 +2,11 @@
   <img src="./assets/readme/hero.svg" width="100%" alt="see 为任何不支持多模态的模型补充原生图片与视频理解">
 </p>
 
-`see` 让任何不支持多模态的模型直接查看图片和视频。图片默认交给 Qwen3.7 Plus；视频优先交给 Gemini 3.1 Flash-Lite，平台不可用时使用 Qwen3.7 Plus。
+分析图片、截图和视频，输出可阅读的媒体报告，并在适用时使用本地文字识别。
 
 ## 不要拖图
 
-当前主模型如果不支持视觉，把图片拖进 Codex 或粘贴附件，会在 Skill 启动前被接口拒绝。模型会说「不支持视觉识别」，然后停住，`$see` 不会被调用。
+如果当前宿主在 Skill 启动前拒绝图片附件，可以提供可读的本地路径；不能据此断言所有宿主都会拒绝附件。
 
 把图片保存到本地，发送路径或 URL，或显式输入 `$see`：
 
@@ -18,11 +18,11 @@
 $see
 ```
 
-配置时 onboard 会把一条短规则写入 `~/.codex/AGENTS.md`，让 Codex 每轮先看到：不要因为模型没有视觉就拒绝，去调用 `$see`。写入后重启 Codex。
+配置凭据不会修改全局规则。只有用户明确要求全局接入时才运行 `onboard.py --install-agents`；它是可选适配，不是图片分析的前置步骤。
 
 ## 安装
 
-把下面这句话发给 Codex：
+把下面这句话发给 Agent：
 
 ```text
 安装 https://github.com/oil-oil/see-skill skill
@@ -34,7 +34,7 @@ $see
 帮我配置 see
 ```
 
-Codex 会启动 onboard。选择供应商后，在隐藏输入框中填写 API Key；Key 不需要发到聊天里，也不会写进 Skill 或项目仓库。
+Agent 会按[配置说明](see/references/api-key-setup.md)展示本机页面。选择实际使用的服务后，由你亲自填写 Key；保存后经对应 run 入口启动分析。
 
 没有多模态 Key 也能使用，onboard 时选择 `local` 即可。
 
@@ -44,7 +44,7 @@ Codex 会启动 onboard。选择供应商后，在隐藏输入框中填写 API K
 # 仅明确要求修改全局规则时：python3 see/scripts/onboard.py --install-agents
 ```
 
-安装 Skill 不会更换右下角的主模型。继续显示 DeepSeek 等文本模型是正常的，`see` 只在查看媒体时调用视觉后端。
+安装 Skill 不会更换右下角的主模型。继续显示原来的文本模型是正常的，`see` 只在查看媒体时调用视觉后端。
 
 ## 直接使用
 
@@ -130,7 +130,7 @@ see/scripts/see.sh demo.mp4
 
 ## Onboard 与 Key 保存
 
-Onboard 可重复运行，用于添加供应商、更换默认路由或切换成本地模式：
+新 Key 使用固定页面，云端执行通过对应配置的 run 包装器。旧 Onboard 保留给用户主动选择的终端配置、路由调整和本地模式：
 
 ```bash
 python3 see/scripts/onboard.py
@@ -232,4 +232,10 @@ see/
 
 ## 凭据与数据边界
 
-云端分析会把选定媒体发给所选供应商，可能计费；本地 OCR 不等于完整视觉理解。新密钥通过终端隐藏输入存入系统凭据库，普通配置只保存引用。先用任务 Python 环境安装 `see/scripts/requirements-credentials.txt`（Skill 内相对路径为 `scripts/requirements-credentials.txt`）。不把 Key 发到聊天、命令参数或日志。旧明文配置不会自动迁移或覆盖：入口会先停止，提示备份后重新配置。状态检查只确认来源，API 验证成功才代表可用。全局指令写入仅在明确调用 `--install-agents` 时发生。
+云端分析会把选定媒体发给所选供应商，可能计费；本地 OCR 不等于完整视觉理解。新密钥通过随附本机配置页存入系统凭据库，普通配置只保存引用。先用任务 Python 环境安装 `see/scripts/requirements-credentials.txt`（Skill 内相对路径为 `scripts/requirements-credentials.txt`）。不把 Key 发到聊天、命令参数或日志。旧明文配置不会自动迁移或覆盖：入口会先停止，提示备份后重新配置。状态检查只确认来源，API 验证成功才代表可用。全局指令写入仅在明确调用 `--install-agents` 时发生。
+
+## API Key 配置页面
+
+首次使用外部服务时，可以在本机配置页亲自填写 Key；已有配置会复用，密钥存入系统凭据库。只为实际使用的外部服务配置；纯本地处理不需要 Key。页面需要 Node.js 22.18+ 与可用的系统凭据服务，业务运行仍使用原依赖。
+
+安装、状态检查、打开页面和带凭据运行的完整入口见[配置说明](see/references/api-key-setup.md)。页面保存与业务读取已经接通；不把 Key 发进聊天，也不自动迁移旧文件。
