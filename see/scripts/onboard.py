@@ -11,11 +11,12 @@ import sys
 import tempfile
 import zlib
 from pathlib import Path
+import secure_credentials
 
 SEE_AGENTS_START = "<!-- see-skill:start -->"
 SEE_AGENTS_END = "<!-- see-skill:end -->"
 SEE_AGENTS_RULE = """<!-- see-skill:start -->
-If the user sends an image, screenshot, video, path, or URL — or you would say "this model does not support image input" / 不支持视觉 — do not refuse. Invoke `$see` and run `scripts/see.sh`. If an attachment was rejected, ask for a local path or URL, then run `$see`.
+用户需要媒体分析且当前原生视觉不足时，可使用 `$see`。先复用已有可读输入；外部发送须符合用户授权。无可用视觉或 OCR 时如实说明限制，不把 OCR 当作完整视觉理解。普通文本、任意 URL 和原生视觉已能完成的任务不触发。
 <!-- see-skill:end -->"""
 SEE_AGENTS_PATTERN = re.compile(
     re.escape(SEE_AGENTS_START) + r".*?" + re.escape(SEE_AGENTS_END),
@@ -76,9 +77,9 @@ def install_agents_rule(path: Path | None = None) -> tuple[Path, bool]:
 
 
 def print_trigger_hint() -> None:
-    print("下一步：不要拖图或粘贴图片。发本地路径或 URL，例如：")
+    print("下一步：复用已有可读图片；也可以提供媒体路径或 URL，例如：")
     print("  使用 see 查看 /path/to/screenshot.png")
-    print("或显式输入 $see。如果模型说不支持视觉却没有运行 see.sh，执行：")
+    print("原生视觉不足时可显式使用 $see；全局指令适配为可选步骤：")
     print("  python3 scripts/onboard.py --install-agents")
     print("然后重启 Codex。")
 
@@ -111,9 +112,9 @@ def config_status() -> int:
     print(f"默认方案：{values.get('SEE_PROVIDER', '未设置')}")
     configured = []
     for provider, spec in PROVIDER_SPECS.items():
-        if any(values.get(name, "").strip() for name in spec["key_names"]):
+        if values.get(f'SEE_CREDENTIAL_REF_{provider.upper()}') or any(os.environ.get(name, '').strip() or values.get(name, '').strip() for name in spec['key_names']):
             configured.append(provider)
-    print(f"已保存 Key：{', '.join(configured) if configured else '无'}")
+    print(f"已配置凭据来源（未验证后端或 API）：{', '.join(configured) if configured else '无'}")
     print("视频默认：Gemini 3.1 Flash-Lite；平台不可用时 Qwen3.7 Plus")
     agents_path = user_agents_path()
     agents_text = agents_path.read_text(encoding="utf-8") if agents_path.exists() else ""
@@ -168,6 +169,9 @@ def clean_value(value: str, label: str) -> str:
 
 
 def write_config(values: dict[str, str]) -> Path:
+    secret_names = {'SEE_API_KEY'} | {name for spec in PROVIDER_SPECS.values() for name in spec['key_names']}
+    if any(values.get(name) for name in secret_names):
+        raise RuntimeError('旧配置仍有明文凭据；请明确迁移到系统凭据库后再保存，原文件保持不变')
     path = config_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
@@ -218,17 +222,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def maybe_install_agents(args: argparse.Namespace, interactive: bool) -> None:
-    if args.skip_agents:
-        return
-    if interactive and not confirm("写入 Codex 用户指令，避免模型因不支持视觉而拒绝看图？"):
-        print("已跳过 AGENTS.md。之后可运行：python3 scripts/onboard.py --install-agents")
-        return
-    path, changed = install_agents_rule()
-    if changed:
-        print(f"已写入看图拒绝覆盖：{path}")
-        print("重启 Codex 后生效。")
-    else:
-        print(f"看图拒绝覆盖已存在：{path}")
+    # 全局配置只能由显式 --install-agents 分支写入。
+    return
 
 
 def main() -> int:
@@ -246,6 +241,10 @@ def main() -> int:
     interactive = args.provider is None
     provider_name = args.provider or choose_provider()
     values = read_env_file(config_file_path())
+
+    secret_names = {'SEE_API_KEY'} | {name for spec in PROVIDER_SPECS.values() for name in spec['key_names']}
+    if any(values.get(name) for name in secret_names):
+        fail('检测到旧明文配置，本次未改动。请先将旧配置移至仅自己可读的备份，重新运行配置入口；验证成功后自行删除旧备份。')
 
     if provider_name == "local":
         print("正在检查本地图片分析 ...")
@@ -283,7 +282,11 @@ def main() -> int:
             if not interactive or not confirm(f"验证失败：{safe_error(exc)}\n仍然保存配置吗？", default=False):
                 fail("配置未保存")
 
-    values[key_name] = api_key
+    reference = f'see/{provider_name}/default'
+    secure_credentials.save(reference, api_key)
+    for alias in spec['key_names']:
+        values.pop(alias, None)
+    values[f'SEE_CREDENTIAL_REF_{provider_name.upper()}'] = reference
     if args.model:
         values[spec["model_env"]] = model
     if args.base_url:

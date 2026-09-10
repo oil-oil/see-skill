@@ -224,6 +224,10 @@ def resolve_provider(
             break
     if not api_key and use_common:
         api_key = setting("SEE_API_KEY", values)
+    reference = values.get(f'SEE_CREDENTIAL_REF_{name.upper()}', '')
+    if not api_key and reference:
+        import secure_credentials
+        api_key = secure_credentials.read(reference)
     if name == "zenmux" and not api_key:
         legacy = Path.home() / ".config" / "see" / "api_key"
         if legacy.is_file():

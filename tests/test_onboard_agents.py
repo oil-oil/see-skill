@@ -12,14 +12,16 @@ import onboard
 
 
 class AgentsRuleTests(unittest.TestCase):
-    def test_description_front_loads_refusal_override(self) -> None:
-        skill = (Path(__file__).resolve().parents[1] / "see" / "SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        description = skill.split("description:", 1)[1].split("\n", 1)[0]
-        self.assertIn("Do not refuse vision", description[:80])
-        self.assertIn("不支持视觉", description[:80])
-        self.assertIn("this model does not support image input", description)
+    def test_description_declares_capability_boundary(self) -> None:
+        skill = (Path(__file__).resolve().parents[1] / "see" / "SKILL.md").read_text()
+        self.assertIn("原生视觉", skill)
+        self.assertIn("如实", onboard.SEE_AGENTS_RULE)
+
+    def test_default_configuration_never_installs_global_rules(self) -> None:
+        from unittest.mock import patch
+        with patch.object(onboard, 'install_agents_rule') as install:
+            onboard.maybe_install_agents(None, True)
+        install.assert_not_called()
 
     def test_upsert_creates_and_updates_without_duplicating(self) -> None:
         created = onboard.upsert_agents_rule("")
@@ -31,7 +33,7 @@ class AgentsRuleTests(unittest.TestCase):
         second = onboard.upsert_agents_rule(first.replace("Invoke `$see`", "Invoke `$see` now"))
         self.assertIn("保持简洁。", second)
         self.assertEqual(second.count(onboard.SEE_AGENTS_START), 1)
-        self.assertIn("Invoke `$see` and run", second)
+        self.assertIn("原生视觉不足", second)
 
     def test_install_agents_rule_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory(prefix="see-agents-") as tmp:

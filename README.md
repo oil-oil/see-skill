@@ -41,7 +41,7 @@ Codex 会启动 onboard。选择供应商后，在隐藏输入框中填写 API K
 只补 Codex 拒绝覆盖、不改供应商时：
 
 ```bash
-python3 see/scripts/onboard.py --install-agents
+# 仅明确要求修改全局规则时：python3 see/scripts/onboard.py --install-agents
 ```
 
 安装 Skill 不会更换右下角的主模型。继续显示 DeepSeek 等文本模型是正常的，`see` 只在查看媒体时调用视觉后端。
@@ -134,7 +134,7 @@ Onboard 可重复运行，用于添加供应商、更换默认路由或切换成
 
 ```bash
 python3 see/scripts/onboard.py
-python3 see/scripts/onboard.py --install-agents
+# 仅明确要求修改全局规则时：python3 see/scripts/onboard.py --install-agents
 python3 see/scripts/onboard.py --status
 ```
 
@@ -143,13 +143,13 @@ python3 see/scripts/onboard.py --status
 - macOS / Linux：`~/.config/see/config.env`
 - Windows：`%APPDATA%\see\config.env`
 
-配置文件以明文环境变量格式保存在本机，并限制为仅当前用户可读写。环境变量优先级最高，适合 CI 或不希望落盘的用户；项目 `.env.local` 其次，用户私有配置最后。
+普通配置保存供应商、模型和系统凭据引用，并限制为仅当前用户可读写；新密钥不写入该文件。环境变量优先级最高，适合 CI 或不希望落盘的用户；项目 `.env.local` 其次，用户私有配置最后。
 
 高级用户也可以直接设置：
 
 ```bash
 export SEE_PROVIDER=zenmux
-export ZENMUX_API_KEY=你的Key
+# ZENMUX_API_KEY 由可信运行环境注入，不在命令正文填写
 ```
 
 不要把真实 Key 提交到 Git。
@@ -229,3 +229,7 @@ see/
 ## License
 
 [MIT](./LICENSE) © 2026 oil-oil
+
+## 凭据与数据边界
+
+云端分析会把选定媒体发给所选供应商，可能计费；本地 OCR 不等于完整视觉理解。新密钥通过终端隐藏输入存入系统凭据库，普通配置只保存引用。先用任务 Python 环境安装 `see/scripts/requirements-credentials.txt`（Skill 内相对路径为 `scripts/requirements-credentials.txt`）。不把 Key 发到聊天、命令参数或日志。旧明文配置不会自动迁移或覆盖：入口会先停止，提示备份后重新配置。状态检查只确认来源，API 验证成功才代表可用。全局指令写入仅在明确调用 `--install-agents` 时发生。
